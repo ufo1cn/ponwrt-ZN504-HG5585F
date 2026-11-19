@@ -84,7 +84,7 @@ env:
     r8152-firmware rtl8192cu-firmware rtl8822ce-firmware rtl8821ce-firmware
     rtl8723bu-firmware rtl8723de-firmware
     kmod-usbip kmod-usbip-client kmod-usbip-server kmod-usbmon
-    usbutils usbids usbmode usb-modeswitch
+    usbutils usbids usb-modeswitch
 
 jobs:
   build:
