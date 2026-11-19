@@ -219,6 +219,20 @@ jobs:
           mkdir -p output build_log
           manifest="configs/pon-userspace-packages.txt"
           [ -f "$manifest" ] || { echo "::error::缺少 $manifest"; exit 1; }
+          # 诊断：luci 应用报 “No rule to make target <path>/compile” 说明扫描未登记该包，先把证据落盘
+          {
+            echo "--- feeds/luci/luci.mk:"
+            ls -l feeds/luci/luci.mk 2>&1 || true
+            echo "--- package/pon-userspace 目录:"
+            ls -1 package/pon-userspace 2>&1 || true
+            echo "--- package/feeds 下的 luci-app-camlive/go2rtc/btsp/blueaudio/ser2net 副本:"
+            ls -d package/feeds/*/luci-app-* 2>/dev/null | grep -E 'camlive|go2rtc|btsp|blueaudio|ser2net' || echo "(no feed copy)"
+            echo "--- tmp/.packageinfo 中 pon-userspace 相关登记:"
+            grep -o "package/pon-userspace/[a-z0-9-]*" tmp/.packageinfo 2>/dev/null | sort -u || echo "(no packageinfo entry)"
+            echo "--- .config 相关符号:"
+            grep -E "CONFIG_PACKAGE_(luci-app-|gensio|camlive|go2rtc|ser2net)" .config 2>/dev/null || echo "(none)"
+          } > build_log/scan-diag.txt 2>&1 || true
+          cat build_log/scan-diag.txt || true
 
           only="${{ inputs.only }}"
           fail=0; summary=""; missing_dirs=""
