@@ -5,8 +5,11 @@ PKG_VERSION:=2.4.1
 PKG_RELEASE:=1
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
-PKG_SOURCE_URL:=https://github.com/cminyard/gensio/releases/download/v$(PKG_VERSION)
-PKG_HASH:=76b47476d4099a8c0d1d02b1f402615960690b490189d4642b18021a072c4f6e
+# GitHub releases 资产在 CI 上取不到（run 44577422664 的 gensio-bin.log：github.com 403、各镜像 404
+# → No more mirrors to try）。改用 codeload 源码包，PKG_FIXUP:=autoreconf 会重新生成 configure，
+# hash 为本地实测 codeload tar 的 sha256（解包根目录同为 gensio-2.4.1）。
+PKG_SOURCE_URL:=https://codeload.github.com/cminyard/gensio/tar.gz/refs/tags/v$(PKG_VERSION)
+PKG_HASH:=d344060af79e73fdd6dd795a7be1ac3f3a898ca68faa1458b26015263008623b
 
 PKG_FIXUP:=autoreconf
 PKG_INSTALL:=1
