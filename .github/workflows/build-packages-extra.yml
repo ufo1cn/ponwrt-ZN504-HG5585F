@@ -332,8 +332,12 @@ jobs:
             # 路径不存在时按目录名回退查找，不写死、也不静默跳过。
             if [ ! -d "$path" ]; then
               base=$(basename "$path")
-              hit_dir=$(find package/feeds -maxdepth 4 -type d -name "$base" 2>/dev/null | head -n 1)
-              [ -n "$hit_dir" ] || hit_dir=$(find feeds -maxdepth 4 -type d -name "$base" 2>/dev/null | head -n 1)
+              # package/feeds/<feed>/<pkg> 是 symbols link，find -type d 会漏掉，
+              # 必须把 -type l 也算进来；同时只认真正带 Makefile 的目录，
+              # 裸 feeds/ 目录没有 <path>/compile 规则，编它必然失败。
+              hit_dir=$(find package/feeds -maxdepth 4 \( -type d -o -type l \) -name "$base" 2>/dev/null | head -n 1)
+              [ -n "$hit_dir" ] || hit_dir=$(find feeds -maxdepth 4 \( -type d -o -type l \) -name "$base" 2>/dev/null | head -n 1)
+              if [ -n "$hit_dir" ] && [ ! -f "$hit_dir/Makefile" ]; then hit_dir=""; fi
               if [ -n "$hit_dir" ]; then
                 echo ">>> 路径回退: $path -> $hit_dir"
                 path="$hit_dir"
@@ -362,6 +366,8 @@ jobs:
               fi
             else
               echo "::error::$apk 编译失败，日志 build_log/${apk}.log"
+              { echo; echo ">>> 并行编译看不到原始错误，用 -j1 V=s 复跑取尾部 100 行"; \
+                make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "build_log/${apk}.log" || true
               summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
             fi
           done < "$manifest"
