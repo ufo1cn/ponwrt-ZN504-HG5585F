@@ -142,10 +142,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          ./scripts/kconfig.pl + \
-            configs/an7581.config \
-            configs/release.config \
-            configs/pon-packages/*.config > .config
+          # kconfig.pl 只支持二元 + 表达式：`+ f1 f2 f3` 传到第 3 个参数就 die
+          # "Parse error at ./scripts/kconfig.pl line 189"（固件工作流只传 2 个文件才没暴露）。
+          # 正确写法是每个文件前都补一个 +，这里动态拼装。
+          merge_args=()
+          for f in configs/an7581.config configs/release.config configs/pon-packages/*.config; do
+            merge_args+=("+" "$f")
+          done
+          echo ">>> kconfig.pl ${merge_args[*]}"
+          ./scripts/kconfig.pl "${merge_args[@]}" > .config
 
           sed -i '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' .config
           printf 'CONFIG_KERNEL_DEBUG_INFO=y\n# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set\nCONFIG_KERNEL_DEBUG_INFO_BTF=y\nCONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y\nCONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y\nCONFIG_KERNEL_KPROBES=y\nCONFIG_KERNEL_BPF_EVENTS=y\n' >> .config
