@@ -249,6 +249,8 @@ jobs:
               fi
             else
               echo "::error::$apk 编译失败，日志 build_log/${apk}.log"
+              { echo; echo ">>> 并行编译看不到原始错误，用 -j1 V=s 复跑取尾部 100 行"; \
+                make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "build_log/${apk}.log" || true
               summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
             fi
           done < "$manifest"
