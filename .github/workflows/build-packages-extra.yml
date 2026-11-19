@@ -210,13 +210,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # kconfig.pl 只支持 **二元** 的 + 表达式：`+ f1 f2 f3` 这种一次传 3 个以上文件
-          # 会在第 3 个参数处报 "Parse error at ./scripts/kconfig.pl line 189"。
-          # 正确写法是 `+ f1 + f2 + f3`（每个文件前面都补一个 +）。这里动态拼装。
-          merge_args=()
+          # kconfig.pl 的 + 是【二元】操作符（parse_expr：'+' 吃两个操作数），
+          # 所以 N 个文件必须是「N-1 个 +，最后一个文件前面不加 +」：`+ f1 + f2 f3`。
+          #   · 写成 `+ f1 f2 f3`   → 多余参数残留，die "Parse error" line 189
+          #   · 写成 `+ f1 + f2 + f3` → 最内层 + 缺第二个操作数，die "Parse error" line 144
+          # 这里按「+ 只夹在文件之间、首个文件前一个 +」拼装。
+          merge_args=("+")
+          first=1
           for f in configs/an7581.config configs/release.config \
                    configs/pon-packages/*.config configs/pon-extra/*.config; do
-            merge_args+=("+" "$f")
+            [ "$first" -eq 1 ] || merge_args+=("+")
+            merge_args+=("$f")
+            first=0
           done
           echo ">>> kconfig.pl ${merge_args[*]}"
           ./scripts/kconfig.pl "${merge_args[@]}" > .config
