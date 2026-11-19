@@ -142,17 +142,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          # kconfig.pl 的 + 是【二元】操作符（parse_expr：'+' 吃两个操作数），
-          # 所以 N 个文件必须是「N-1 个 +，最后一个文件前面不加 +」：`+ f1 + f2 f3`。
-          #   · 写成 `+ f1 f2 f3`    → 多余参数残留，die "Parse error" line 189
-          #   · 写成 `+ f1 + f2 + f3` → 最内层 + 缺第二个操作数，die "Parse error" line 144
-          # 这里按「+ 只夹在文件之间、首个文件前一个 +」拼装。
-          merge_args=("+")
-          first=1
-          for f in configs/an7581.config configs/release.config configs/pon-packages/*.config; do
-            [ "$first" -eq 1 ] || merge_args+=("+")
-            merge_args+=("$f")
-            first=0
+          # kconfig.pl 的 + 是【二元】操作符（parse_expr 里 '+' 吃两个操作数），
+          # 语法是 E = '+' E E | 文件名，所以 N 个文件必须用 N-1 个 +，
+          # 且【最后一个文件前面不加 +】：`+ f1 + f2 f3`
+          #   · `+ f1 f2 f3`     → 多余参数残留，die "Parse error" line 189
+          #   · `+ f1 + f2 + f3` → 最内层 + 缺第二个操作数，die "Parse error" line 144
+          files=(configs/an7581.config configs/release.config configs/pon-packages/*.config)
+          merge_args=()
+          n=${#files[@]}
+          for ((i=0; i<n; i++)); do
+            if [ "$i" -lt "$((n-1))" ]; then
+              merge_args+=("+" "${files[$i]}")
+            else
+              merge_args+=("${files[$i]}")
+            fi
           done
           echo ">>> kconfig.pl ${merge_args[*]}"
           ./scripts/kconfig.pl "${merge_args[@]}" > .config
