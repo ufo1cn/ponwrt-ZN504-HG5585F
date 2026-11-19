@@ -1,0 +1,27 @@
+# build-packages-extra.yml 的 C 类编译清单
+# 格式：<构建路径>|<apk 包名>|<required 或 optional>
+# 路径不存在时工作流会按目录名在 package/feeds 下回退查找，找不到才判定缺失。
+# mihomo-meta / mihomo-alpha 由 inputs.mihomo 门控（互 PROVIDES/CONFLICTS，只能选一个）。
+
+# ---- iptv（源码 feeds/iptv，yveming/openwrt-iptv）----
+package/feeds/iptv/iptv|kmod-iptv|required
+package/feeds/iptv/luci-app-iptv|luci-app-iptv|required
+package/feeds/iptv/luci-i18n-iptv-zh-cn|luci-i18n-iptv-zh-cn|optional
+
+# ---- 组播代理（kmod-iptv 的配套数据面，非必须但推荐）----
+package/feeds/packages/omcproxy|omcproxy|optional
+package/feeds/packages/luci-app-omcproxy|luci-app-omcproxy|optional
+
+# ---- nikki / mihomo（源码 feeds/nikki）----
+package/feeds/nikki/nikki|nikki|required
+package/feeds/nikki/luci-app-nikki|luci-app-nikki|required
+package/feeds/nikki/luci-i18n-nikki-zh-cn|luci-i18n-nikki-zh-cn|optional
+package/feeds/nikki/mihomo-meta|mihomo-meta|required
+package/feeds/nikki/mihomo-alpha|mihomo-alpha|required
+
+# ---- passwall2 + 其唯一核心 xray-core ----
+package/feeds/passwall2/luci-app-passwall2|luci-app-passwall2|required
+package/feeds/packages/xray-core|xray-core|required
+
+# ---- homeproxy（immortalwrt/homeproxy，依赖 sing-box，树内已选）----
+package/feeds/homeproxy/luci-app-homeproxy|luci-app-homeproxy|required
