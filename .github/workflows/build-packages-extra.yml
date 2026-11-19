@@ -69,6 +69,15 @@ on:
           - 'meta'
           - 'alpha'
           - 'none'
+      scope:
+        description: '编哪一组：both=B类+C类，pon-userspace=B类，extra=C类'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - 'both'
+          - 'pon-userspace'
+          - 'extra'
 
 concurrency:
   group: manual-extra-packages-${{ github.ref }}
@@ -197,15 +206,21 @@ jobs:
         run: |
           bash ./scripts/customize.sh
 
-      - name: Configure (same as firmware + C 类选择)
+      - name: Configure (same as firmware + B/C 类选择)
         run: |
           set -euo pipefail
 
-          ./scripts/kconfig.pl + \
-            configs/an7581.config \
-            configs/release.config \
-            configs/pon-packages/*.config \
-            configs/pon-extra/*.config > .config
+          # kconfig.pl 只支持 **二元** 的 + 表达式：`+ f1 f2 f3` 这种一次传 3 个以上文件
+          # 会在第 3 个参数处报 "Parse error at ./scripts/kconfig.pl line 189"。
+          # 正确写法是 `+ f1 + f2 + f3`（每个文件前面都补一个 +）。这里动态拼装。
+          merge_args=()
+          for f in configs/an7581.config configs/release.config \
+                   configs/pon-packages/*.config configs/pon-extra/*.config; do
+            merge_args+=("+" "$f")
+          done
+          echo ">>> kconfig.pl ${merge_args[*]}"
+          ./scripts/kconfig.pl "${merge_args[@]}" > .config
+          grep -c '^CONFIG_' .config
 
           sed -i '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' .config
           printf 'CONFIG_KERNEL_DEBUG_INFO=y\n# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set\nCONFIG_KERNEL_DEBUG_INFO_BTF=y\nCONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y\nCONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y\nCONFIG_KERNEL_KPROBES=y\nCONFIG_KERNEL_BPF_EVENTS=y\n' >> .config
@@ -262,16 +277,29 @@ jobs:
           set -euo pipefail
           make -j"$(nproc)" package/kernel/linux/compile
 
-      - name: Build extra packages (no silent drop)
+      - name: Build packages (B/C 两组清单, no silent drop)
         run: |
           set -euo pipefail
           mkdir -p output build_log
-          manifest="configs/pon-extra-packages.txt"
-          [ -f "$manifest" ] || { echo "::error::缺少 $manifest"; exit 1; }
+
+          scope="${{ inputs.scope }}"
+          manifests=()
+          case "$scope" in
+            both)          manifests=(configs/pon-userspace-packages.txt configs/pon-extra-packages.txt) ;;
+            pon-userspace) manifests=(configs/pon-userspace-packages.txt) ;;
+            extra)         manifests=(configs/pon-extra-packages.txt) ;;
+            *)             echo "::error::未知 scope $scope"; exit 1 ;;
+          esac
 
           only="${{ inputs.only }}"
-          variant="mihomo-${{ inputs.mihomo }}"
           fail=0; summary=""; skipped=""
+          for manifest in "${manifests[@]}"; do
+            if [ ! -f "$manifest" ]; then
+              echo "::error::缺少清单 $manifest"
+              summary="${summary}\nFAIL   (manifest) 缺失 $manifest"; fail=1
+              continue
+            fi
+            echo ">>> 清单 $manifest"
           while IFS='|' read -r path apk required; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
@@ -329,15 +357,16 @@ jobs:
               summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
             fi
           done < "$manifest"
+          done
 
           {
-            echo "# C 类独立包逐包结果（${{ inputs.device }} / mihomo=${{ inputs.mihomo }}）"
+            echo "# 独立包逐包结果（${{ inputs.device }} / scope=$scope / mihomo=${{ inputs.mihomo }}）"
             echo -e "$summary"
-            [ -n "$skipped" ] && echo -e "\n$skipped"
+            [ -n "$skipped" ] && echo -e "\n$skipped" || true
           } > build_log/extra-package-summary.txt
           cat build_log/extra-package-summary.txt
           {
-            echo "### C 类逐包结果（${{ inputs.device }} / mihomo=${{ inputs.mihomo }}）"
+            echo "### 逐包结果（${{ inputs.device }} / scope=$scope / mihomo=${{ inputs.mihomo }}）"
             echo '```'
             cat build_log/extra-package-summary.txt
             echo '```'
