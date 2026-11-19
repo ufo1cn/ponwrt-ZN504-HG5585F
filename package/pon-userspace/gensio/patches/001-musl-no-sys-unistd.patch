@@ -1,0 +1,16 @@
+musl 没有 glibc 专有的 <sys/unistd.h>（内容就是 <unistd.h>），tools/gensiotool.c 在非 _WIN32 分支
+无条件包含它，交叉编译 musl 目标时报：
+  tools/gensiotool.c:47:10: fatal error: sys/unistd.h: No such file or directory
+  make[5]: *** [Makefile:721: gensiotool.o] Error 1
+（run 44627229902 第 15 步 build_log/gensio.log 尾部，configure 的 python 问题已在 d02615df 修掉后
+才暴露到这里）。该头只此一处使用，删掉即可（unistd.h 的声明已由其它头引入）。
+
+--- a/tools/gensiotool.c
++++ b/tools/gensiotool.c
+@@ -44,6 +44,5 @@
+ #include <signal.h>
+ #include <errno.h>
+ #include <sys/types.h>
+-#include <sys/unistd.h>
+ #include <syslog.h>
+ #endif
