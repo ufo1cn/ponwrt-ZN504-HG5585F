@@ -46,6 +46,7 @@ endef
 CONFIGURE_ARGS += \
 	--with-bluealsauser=root \
 	--with-bluealsaaplayuser=root \
+	--with-alsaplugindir=/usr/lib/alsa-lib \
 	--disable-systemd \
 	--disable-upower \
 	--disable-manpages \
