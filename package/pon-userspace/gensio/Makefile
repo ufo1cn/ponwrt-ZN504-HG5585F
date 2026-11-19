@@ -18,6 +18,18 @@ PKG_FIXUP:=autoreconf
 PKG_INSTALL:=1
 PKG_BUILD_PARALLEL:=1
 
+# CI 交叉编译时 configure 会误用 staging 的 host python3 去链接 target 库，
+# 报 "Could not link test program to Python" 失败；本包只需要 C 库给 ser2net 用，
+# 语言绑定（python/tcl/swig/go/mdns/openipmi/sctp）一律显式关掉。
+CONFIGURE_ARGS:= \
+	--without-python \
+	--without-tcl \
+	--without-swig \
+	--without-go \
+	--without-mdns \
+	--without-openipmi \
+	--without-sctp
+
 include $(INCLUDE_DIR)/package.mk
 
 define Package/gensio
