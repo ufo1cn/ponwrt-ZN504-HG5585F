@@ -23,6 +23,11 @@ PKG_SOURCE_VERSION:=v$(PKG_VERSION)
 PKG_FIXUP:=autoreconf
 PKG_INSTALL:=1
 PKG_BUILD_PARALLEL:=1
+# configure 需要 gdbus-codegen（由 host 版 glib2 提供）。不声明这条时，
+# 只会编 cross 版 glib2，staging_dir/host/bin/gdbus-codegen 不存在 →
+#   checking for gdbus-codegen... no
+#   configure: error: gdbus-codegen not found   (legacy run 44752208306 实测)
+PKG_BUILD_DEPENDS:=glib2/host
 PKG_LICENSE:=LGPL-2.1-or-later
 PKG_MAINTAINER:=Self
 
