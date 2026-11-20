@@ -1,0 +1,67 @@
+# build-packages-legacy.yml 的编译清单
+# 目的：把"旧仓（PonWrt-HG5382A）有、新仓（ponwrt-ZN504-HG5585F）没有"的用户态软件，
+#       在新仓同一内核源码树上用固定私钥重新编成 apk，产物发布到 ufo1cn/ponwrt-apk-repo。
+#
+# 格式：auto|<apk 包名>|<required 或 optional>
+#   auto = 由 workflow 自动解析源码目录（先按目录名，再按 Makefile 里的 Package/<apk>，
+#          最后按 PKG_NAME 反查），不写死 feeds 路径。
+#
+# 已刻意排除（会与新仓固件冲突，不重编）：
+#   · 全部 kmod-*（kmod-rtw88 全家 / rtl8xxxu / rtl8192cu / usb-xhci / usb-serial-ch341 /
+#     usb-net-rtl8152 / asix-ax88179 / video-uvc / usb-audio / sound-core / kmod-wireguard /
+#     kmod-fs-nfs* / kmod-fs-ksmbd / kmod-crypto-arc4）
+#     → 内核 ABI 与固件强绑定；且 USB 版固件的 USB_PKGS 已把其中大部分 =y 编进镜像，重复装会顶掉镜像内模块。
+#   · audio-support（内核虚拟包，固件内已 =y）
+#   · sing-box（新仓固件 config 已选，重编会与镜像内版本重名）
+#   · ksmbd-tools / luci-app-ksmbd（服务端依赖 kmod-fs-ksmbd，而该 kmod 属上一条不重编，
+#     装上也起不来；SMB 服务端改用纯用户态的 samba4-server）
+#   · libx264（作为 ffmpeg 的子包一并产出，不单列）
+#
+# ---- 文件共享（SMB / mDNS）----
+auto|samba4-server|required
+auto|luci-app-samba4|required
+auto|autosamba|required
+auto|avahi-daemon|required
+# ---- NFS 服务端（用户态部分）----
+auto|nfs-utils|required
+auto|nfs-utils-libs|required
+auto|nfs-kernel-server|required
+auto|nfs-kernel-server-utils|required
+# ---- 系统工具 / LuCI 前端 ----
+auto|ttyd|required
+auto|luci-app-ttyd|required
+auto|luci-app-cpufreq|required
+auto|luci-app-diskman|required
+auto|luci-theme-argon|required
+auto|ddns-scripts|required
+auto|luci-app-ddns|required
+auto|usbutils|required
+auto|lsblk|required
+# ---- 媒体 ----
+auto|ffmpeg|required
+auto|libopus|required
+auto|alsa-utils|required
+# ---- 分流 / DNS / 诊断 ----
+auto|chinadns-ng|required
+auto|tcping|required
+auto|geoview|required
+auto|v2ray-geoip|required
+auto|v2ray-geosite|required
+# ---- 组网 / 远程访问（纯用户态部分）----
+auto|zerotier|required
+auto|luci-app-zerotier|required
+auto|tailscale|required
+auto|luci-app-tailscale-community|required
+auto|wireguard-tools|required
+auto|luci-proto-wireguard|required
+auto|nebula|required
+auto|luci-proto-nebula|required
+auto|n2n|required
+auto|luci-app-n2n|required
+auto|frpc|required
+auto|luci-app-frpc|required
+# ---- 兼容层 / Lua 运行时 ----
+auto|luci-compat|required
+auto|lua5.3|required
+auto|liblua5.3|required
+auto|luci-lua-runtime|optional
