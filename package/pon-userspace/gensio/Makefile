@@ -60,7 +60,13 @@ define Build/InstallDev
 	$(INSTALL_DIR) $(1)/usr/lib
 	$(CP) $(PKG_INSTALL_DIR)/usr/lib/libgensio*.so* $(1)/usr/lib/
 	$(INSTALL_DIR) $(1)/usr/lib/pkgconfig
-	$(CP) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/gensio.pc $(1)/usr/lib/pkgconfig/
+# upstream 2.4.1 的 lib/Makefile.am 里是 `pkgconfigexec_DATA = libgensio.pc`（模板 lib/libgensio.pc.in），
+# 从来没有 gensio.pc；拷错文件名会让 InstallDev 在 cp 阶段直接失败（run 44652096323 第 15 步 gensio.log:65-66）：
+#   cp: cannot stat '.../gensio-2.4.1/ipkg-install/usr/lib/pkgconfig/gensio.pc': No such file or directory
+#   make[2]: *** [Makefile:80: .../stamp/.gensio_installed] Error 1
+# ser2net 的 configure.ac 只做 AC_CHECK_HEADER(gensio/gensio.h) + AC_CHECK_LIB(gensio, str_to_gensio)，
+# 不用 pkg-config，所以这里按真实文件名拷 *.pc 即可，dev 元数据不丢。
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/*.pc $(1)/usr/lib/pkgconfig/
 endef
 
 define Package/gensio/install
