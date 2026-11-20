@@ -48,6 +48,11 @@ on:
         required: true
         default: 'configs/pon-legacy-packages.txt'
         type: string
+      extra_packages:
+        description: '临时追加要编的包（逗号分隔，不必改清单；例：samba4-server,avahi-daemon）'
+        required: true
+        default: ''
+        type: string
       only:
         description: '只编这些 apk（逗号分隔，all=全部；例：samba4-server,avahi-daemon）'
         required: true
@@ -166,13 +171,22 @@ jobs:
           sed -i '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' .config
           printf 'CONFIG_KERNEL_DEBUG_INFO=y\n# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set\nCONFIG_KERNEL_DEBUG_INFO_BTF=y\nCONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y\nCONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y\nCONFIG_KERNEL_KPROBES=y\nCONFIG_KERNEL_BPF_EVENTS=y\n' >> .config
 
+          # 临时清单 = 清单文件 + extra_packages 里临时追加的包
+          TMP=/tmp/pkg-manifest.txt
+          cp "${{ inputs.manifest }}" "$TMP"
+          if [ -n "${{ inputs.extra_packages }}" ]; then
+            printf '%s\n' "${{ inputs.extra_packages }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | \
+              while read -r extra; do echo "auto|${extra}|required" >> "$TMP"; done
+            echo ">>> 临时追加包：$(tail -n +1 "$TMP" | grep -c auto) 项清单"
+          fi
+
           # 清单内每个包先置 m，让 feed 依赖链被解析进来
           while IFS='|' read -r path apk required; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
             sed -i "/^CONFIG_PACKAGE_${apk}=/d;/^# CONFIG_PACKAGE_${apk} is not set/d" .config
             printf 'CONFIG_PACKAGE_%s=m\n' "$apk" >> .config
-          done < "${{ inputs.manifest }}"
+          done < "$TMP"
 
           if [ "${{ inputs.cache_mode }}" != "完全重建" ]; then
             sed -i '/^CONFIG_DEVEL=/d; /^CONFIG_CCACHE=/d' .config
@@ -207,7 +221,7 @@ jobs:
                 miss=$((miss+1))
               fi
             fi
-          done < "${{ inputs.manifest }}"
+          done < "$TMP"
           echo ">>> 未落地必需包数: $miss"
 
       - name: Build host tools and toolchain
@@ -233,6 +247,12 @@ jobs:
           set -euo pipefail
           mkdir -p output build_log
           manifest="${{ inputs.manifest }}"
+          TMP=/tmp/pkg-manifest.txt
+          cp "${{ inputs.manifest }}" "$TMP"
+          if [ -n "${{ inputs.extra_packages }}" ]; then
+            printf '%s\n' "${{ inputs.extra_packages }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*//' | sed '/^$/d' | \
+              while read -r extra; do echo "auto|${extra}|required" >> "$TMP"; done
+          fi
           only="${{ inputs.only }}"
 
           # 源码目录解析：目录名 -> Makefile 里的 Package/<apk> -> PKG_NAME 反查
