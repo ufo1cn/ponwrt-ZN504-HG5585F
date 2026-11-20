@@ -460,12 +460,17 @@ jobs:
           echo ">>> host apk: $APKBIN"
           "$APKBIN" --version || true
           rm -f packages.adb index.err
-          if ! "$APKBIN" index -o packages.adb "${files[@]}" 2>index.err; then
+          # 索引工具是 apk mkndx（OpenWrt 自己的 package/Makefile 也是用它）。
+          # apk index 是 v2 索引生成器（输出 APKINDEX.tar.gz），遇到 v3 ADB 包直接报
+          #   ERROR: output/xxx.apk: file format not supported (in this applet)
+          # —— legacy run 44763931465 实测，于是 packages.adb 从未生成、repo 分支只留 README。
+          SIGN_ARG=""
+          if [ -f "$PWD/private-key.pem" ]; then SIGN_ARG="--sign $PWD/private-key.pem"; fi
+          if ! "$APKBIN" mkndx --root "$PWD" --keys-dir "$PWD" --allow-untrusted $SIGN_ARG \
+                 --output packages.adb "${files[@]}" 2>index.err; then
             cat index.err || true
-            if ! "$APKBIN" index --output packages.adb "${files[@]}"; then
-              echo "::warning::apk index 生成失败，跳过在线源发布"
-              exit 0
-            fi
+            echo "::warning::apk mkndx 生成索引失败，跳过在线源发布"
+            exit 0
           fi
           ls -l packages.adb
           echo ">>> packages.adb 生成成功（$(stat -c%s packages.adb) 字节，${#files[@]} 个 apk）"
@@ -485,7 +490,10 @@ jobs:
           git -C /tmp/apkrepo add -A
           git -C /tmp/apkrepo -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
             commit -m "repo: run=${{ github.run_number }} device=${{ inputs.device }} apk=${#files[@]}" || true
-          git -C /tmp/apkrepo push origin repo
+          if ! git -C /tmp/apkrepo push origin repo; then
+            echo "::error::在线源推送失败（apk 已进 Release，但 raw 目录未更新）"
+            exit 1
+          fi
           echo ">>> 在线源：https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt"
 
       - name: Upload packages artifact
