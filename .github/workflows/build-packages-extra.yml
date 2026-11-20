@@ -94,7 +94,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 480
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -443,3 +443,26 @@ jobs:
             build_log/extra-package-summary.txt
             build_log/*.log
           retention-days: 14
+
+      - name: Publish prerelease (apk + public key, 长期保留)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          files=(output/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::output 为空，跳过预发布"
+            exit 0
+          fi
+          tag="pkgs-extra-${{ inputs.device }}-r${{ github.run_number }}"
+          # artifact 只保留 14 天，Release 资产长期可用；公钥随包一起发布
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" \
+              --prerelease \
+              --title "apk $tag" \
+              --notes "自动预发布：device=${{ inputs.device }} run=${{ github.run_number }} commit=${{ github.sha }}；含本次 apk 与签名公钥 public-key.pem(.sha256)。安装：public-key.pem 放到 /etc/apk/keys/ 后 apk add，或 apk add --allow-untrusted --no-network。"
+          fi
