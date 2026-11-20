@@ -187,11 +187,21 @@ get_status() {
 		[ -n "$fw_rel" ] && npu_fw="/lib/firmware/$fw_rel"
 	fi
 
-	local npu_ver="Unknown"
-	if [ -n "$npu_fw" ] && [ -f "$npu_fw" ]; then
+	# Prefer the version cached by the driver at probe time (941-01 exports
+	# it as a read-only attribute; reading it touches no hardware and sends
+	# no mailbox request, so it survives dmesg wrap-around).
+	local npu_ver=""
+	for npu_dev in /sys/bus/platform/devices/*.npu; do
+		if [ -r "$npu_dev/fw_version" ]; then
+			npu_ver=$(cat "$npu_dev/fw_version" 2>/dev/null)
+			break
+		fi
+	done
+	# Fall back to the version string inside the firmware blob named by DTS.
+	if [ -z "$npu_ver" ] && [ -n "$npu_fw" ] && [ -f "$npu_fw" ]; then
 		npu_ver=$(strings "$npu_fw" 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+-)?TLB[0-9.]+[-_v0-9]*' | head -1)
-		[ -z "$npu_ver" ] && npu_ver="Unknown"
 	fi
+	[ -z "$npu_ver" ] && npu_ver="Unknown"
 
 	local npu_loaded="false"
 	local npu_device=""
