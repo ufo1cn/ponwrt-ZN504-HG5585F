@@ -1,0 +1,419 @@
+name: Build Packages (legacy | 旧仓有、新仓无的用户态软件) manual
+
+# ==============================================================================
+# 只允许手动触发（workflow_dispatch）。
+#
+# 用途：旧仓 ufo1cn/PonWrt-HG5382A 有一批用户态软件，新仓 ufo1cn/ponwrt-ZN504-HG5585F
+#       的清单里没有。这里在**新仓同一内核源码树**上重新编成 apk，签同一把固定私钥，
+#       产物同时发布到本仓 prerelease 和 ufo1cn/ponwrt-apk-repo（长期软件仓库）。
+#
+# 清单：configs/pon-legacy-packages.txt
+#   auto|<apk>|<required|optional>   —— auto 表示由本工作流解析源码目录
+#   清单里已排除所有 kmod-* / 内核虚拟包 / sing-box / ksmbd-tools（理由见清单头注释）：
+#   它们与固件内核 ABI 绑定或与镜像内组件重名，重编会冲突。
+#
+# 签名：固定私钥来自 secret APK_SIGNING_PRIVATE_KEY（与两个仓库所有工作流同一把），
+#       公钥 sha256 = d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed
+#       设备只需 /etc/apk/keys/public-key.pem 一次，之后所有包免 --allow-untrusted。
+#
+# 不发 release 到目标仓时的兜底：secret APK_REPO_TOKEN 缺失则只发本仓并告警。
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '目标机型（决定 .config 里的设备锁定与 ABI）'
+        required: true
+        default: 'hg5585f-ct'
+        type: choice
+        options:
+          - 'hg5585f-ct'
+          - 'hg5382a'
+      cache_mode:
+        description: '缓存模式（完全重建会丢弃所有缓存）'
+        required: true
+        default: '使用缓存'
+        type: choice
+        options:
+          - '使用缓存'
+          - '完全重建'
+      reuse_build_tree:
+        description: '复用 build_dir/staging_dir 缓存（数 GB，命中才是真增量）'
+        required: true
+        default: true
+        type: boolean
+      only:
+        description: '只编这些 apk（逗号分隔，all=全部；例：samba4-server,avahi-daemon）'
+        required: true
+        default: 'all'
+        type: string
+      with_kernel:
+        description: '是否先编内核树（首次必须为 true，kmod 依赖内核 .config）'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    name: Build legacy packages (${{ inputs.device }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3 python3-setuptools python3-dev rsync swig unzip zlib1g-dev \
+            file wget rsync cpio kmod dos2unix
+          df -h /
+
+      - name: Install fixed apk signing key
+        env:
+          APK_SIGNING_PRIVATE_KEY: ${{ secrets.APK_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APK_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::warning::仓库未配置 APK_SIGNING_PRIVATE_KEY，本次用 run 内临时密钥（跨 run 不可互信）"
+            exit 0
+          fi
+          printf '%s\n' "$APK_SIGNING_PRIVATE_KEY" > private-key.pem
+          chmod 600 private-key.pem
+          openssl ec -in private-key.pem -pubout -out public-key.pem
+          sha256sum public-key.pem
+
+      - name: Restore build tree cache (与固件工作流共用前缀)
+        if: inputs.reuse_build_tree && inputs.cache_mode != '完全重建'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build_dir/target-*
+            build_dir/host
+            staging_dir/target-*
+            staging_dir/host
+          key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-${{ github.run_id }}
+          restore-keys: |
+            ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-
+            ponwrt-tree-${{ inputs.device }}-
+
+      - name: Restore downloads cache
+        if: inputs.cache_mode != '完全重建'
+        uses: actions/cache/restore@v4
+        with:
+          path: dl
+          key: ponwrt-dl-pkg-${{ hashFiles('feeds.conf.default', 'configs/**/*.config') }}-${{ github.run_id }}
+          restore-keys: |
+            ponwrt-dl-pkg-${{ hashFiles('feeds.conf.default', 'configs/**/*.config') }}-
+            ponwrt-dl-pkg-
+
+      - name: Restore compiler ccache
+        if: inputs.cache_mode != '完全重建'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ponwrt-ccache-pkg-${{ inputs.device }}-${{ github.run_id }}
+          restore-keys: |
+            ponwrt-ccache-pkg-${{ inputs.device }}-
+            ponwrt-ccache-pkg-
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Prepare custom packages and patches
+        run: |
+          bash ./scripts/customize.sh
+
+      - name: Configure (same as firmware)
+        run: |
+          set -euo pipefail
+
+          # kconfig.pl 的 + 是二元操作符：N 个文件用 N-1 个 +，最后一个不加 +
+          files=(configs/an7581.config configs/release.config \
+                 configs/pon-packages/*.config)
+          merge_args=()
+          n=${#files[@]}
+          for ((i=0; i<n; i++)); do
+            if [ "$i" -lt "$((n-1))" ]; then
+              merge_args+=("+" "${files[$i]}")
+            else
+              merge_args+=("${files[$i]}")
+            fi
+          done
+          echo ">>> kconfig.pl ${merge_args[*]}"
+          ./scripts/kconfig.pl "${merge_args[@]}" > .config
+          grep -c '^CONFIG_' .config
+
+          sed -i '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' .config
+          printf 'CONFIG_KERNEL_DEBUG_INFO=y\n# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set\nCONFIG_KERNEL_DEBUG_INFO_BTF=y\nCONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y\nCONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y\nCONFIG_KERNEL_KPROBES=y\nCONFIG_KERNEL_BPF_EVENTS=y\n' >> .config
+
+          # 清单内每个包先置 m，让 feed 依赖链被解析进来
+          while IFS='|' read -r path apk required; do
+            [ -n "${path:-}" ] || continue
+            case "$path" in \#*) continue ;; esac
+            sed -i "/^CONFIG_PACKAGE_${apk}=/d;/^# CONFIG_PACKAGE_${apk} is not set/d" .config
+            printf 'CONFIG_PACKAGE_%s=m\n' "$apk" >> .config
+          done < configs/pon-legacy-packages.txt
+
+          if [ "${{ inputs.cache_mode }}" != "完全重建" ]; then
+            sed -i '/^CONFIG_DEVEL=/d; /^CONFIG_CCACHE=/d' .config
+            printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\n' >> .config
+          fi
+
+          make defconfig
+
+          case "${{ inputs.device }}" in
+            hg5585f-ct) DEVICE="fiberhome_hg5585f-ct" ;;
+            hg5382a)    DEVICE="fiberhome_hg5382a" ;;
+            *)          echo "::error::未知机型 ${{ inputs.device }}"; exit 1 ;;
+          esac
+          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+          sed -i '/^# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.* is not set/d' .config
+          printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_%s=y\n' "$DEVICE" >> .config
+          grep -q "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${DEVICE}=y" .config \
+            || { echo "::error::机型符号未落地: $DEVICE"; exit 1; }
+
+          echo ">>> 清单符号落地情况（=m 才算选中）:"
+          miss=0
+          while IFS='|' read -r path apk required; do
+            [ -n "${path:-}" ] || continue
+            case "$path" in \#*) continue ;; esac
+            if grep -q "^CONFIG_PACKAGE_${apk}=m" .config; then
+              echo "    OK   $apk"
+            else
+              if [ "$required" = "optional" ]; then
+                echo "    SKIP $apk（可选，未落地）"
+              else
+                echo "::warning::符号未落地 $apk（defconfig 后为 =y 或不存在的包名）"
+                miss=$((miss+1))
+              fi
+            fi
+          done < configs/pon-legacy-packages.txt
+          echo ">>> 未落地必需包数: $miss"
+
+      - name: Build host tools and toolchain
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" tools/compile
+          make -j"$(nproc)" toolchain/compile
+
+      - name: Build kernel tree (kmod ABI 来源)
+        if: inputs.with_kernel
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" target/linux/compile
+          make -j"$(nproc)" target/linux/install || true
+
+      - name: Build kernel modules selected by config
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" package/kernel/linux/compile || true
+
+      - name: Build legacy packages (no silent drop)
+        run: |
+          set -euo pipefail
+          mkdir -p output build_log
+          manifest="configs/pon-legacy-packages.txt"
+          only="${{ inputs.only }}"
+
+          # 源码目录解析：目录名 -> Makefile 里的 Package/<apk> -> PKG_NAME 反查
+          resolve_path() {
+            local apk="$1" hit=""
+            hit=$(find package/feeds package feeds -maxdepth 5 \( -type d -o -type l \) -name "$apk" 2>/dev/null | head -n1)
+            if [ -n "$hit" ] && [ -f "$hit/Makefile" ]; then echo "$hit"; return; fi
+            hit=$(grep -rls --include=Makefile -E "^define[[:space:]]+Package/${apk}\$" package feeds 2>/dev/null | head -n1)
+            if [ -n "$hit" ]; then dirname "$hit"; return; fi
+            hit=$(grep -rls --include=Makefile -E "^PKG_NAME[[:space:]]*[:+]?=[[:space:]]*${apk}[[:space:]]*\$" package feeds 2>/dev/null | head -n1)
+            if [ -n "$hit" ]; then dirname "$hit"; return; fi
+            echo ""
+          }
+
+          fail=0; summary=""; skipped=""
+          while IFS='|' read -r path apk required; do
+            [ -n "${path:-}" ] || continue
+            case "$path" in \#*) continue ;; esac
+
+            if [ "$only" != "all" ]; then
+              echo ",$only," | grep -q ",$apk," || continue
+            fi
+
+            if [ "$path" = "auto" ]; then
+              path=$(resolve_path "$apk")
+            fi
+
+            if [ -z "$path" ] || [ ! -f "$path/Makefile" ]; then
+              if [ "$required" = "optional" ]; then
+                echo ">>> SKIP $apk（源码目录未找到，optional）"
+                skipped="${skipped}\nSKIP   $apk（源码目录未找到）"
+                continue
+              fi
+              echo "::error::必需包 $apk 的源码目录未找到"
+              summary="${summary}\nFAIL   $apk（源码目录未找到）"; fail=1
+              continue
+            fi
+
+            echo ">>> 编译 $apk ($path)"
+            if make -j"$(nproc)" "$path/compile" 2>&1 | tee "build_log/${apk}.log"; then
+              hit=$(find bin/packages bin/targets -type f -name "${apk}-[0-9]*.apk" | head -n1)
+              if [ -n "$hit" ]; then
+                summary="${summary}\nOK     $apk -> $hit"
+                cp -f "$hit" output/
+              else
+                echo "::error::$apk 编译命令成功但没有产出 apk"
+                summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
+              fi
+            else
+              echo "::error::$apk 编译失败，日志 build_log/${apk}.log"
+              { echo; echo ">>> 用 -j1 V=s 复跑取尾部 100 行"; \
+                make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "build_log/${apk}.log" || true
+              summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
+            fi
+          done < "$manifest"
+
+          {
+            echo "# 旧仓遗留包逐包结果（${{ inputs.device }} / only=$only）"
+            echo -e "$summary"
+            [ -n "$skipped" ] && echo -e "\n$skipped" || true
+          } > build_log/legacy-package-summary.txt
+          cat build_log/legacy-package-summary.txt
+          {
+            echo "### 旧仓遗留包逐包结果（${{ inputs.device }} / only=$only）"
+            echo '```'
+            cat build_log/legacy-package-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cd output
+          for f in *; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done
+          exit $fail
+
+      - name: Record ABI snapshot (兼容性核对用)
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p output
+          {
+            echo "device=${{ inputs.device }}"
+            echo "commit=${GITHUB_SHA}"
+            echo "run=${{ github.run_number }}"
+            echo "kernel_release=$(cat build_dir/target-*/linux-*/include/config/kernel.release 2>/dev/null | head -n1)"
+            ko=$(find build_dir/target-*/linux-*/ -name '*.ko' 2>/dev/null | head -n1 || true)
+            [ -n "$ko" ] && echo "kmod_vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null)"
+            echo "apk_pubkey_sha256=$(sha256sum public-key.pem 2>/dev/null | cut -d' ' -f1)"
+            echo "config_6_18_sha256=$(sha256sum target/linux/airoha/an7581/config-6.18 2>/dev/null | cut -d' ' -f1)"
+          } > output/abi-info.txt
+          cat output/abi-info.txt
+
+      - name: Export apk signing public key
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p output
+          if [ -f public-key.pem ]; then
+            cp -f public-key.pem output/public-key.pem
+            sha256sum public-key.pem | tee output/public-key.pem.sha256
+          else
+            echo "::warning::本 run 未生成 public-key.pem"
+          fi
+
+      - name: Save downloads cache
+        if: always() && inputs.cache_mode != '完全重建'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: dl
+          key: ponwrt-dl-pkg-${{ hashFiles('feeds.conf.default', 'configs/**/*.config') }}-${{ github.run_id }}
+
+      - name: Save compiler ccache
+        if: always() && inputs.cache_mode != '完全重建'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ponwrt-ccache-pkg-${{ inputs.device }}-${{ github.run_id }}
+
+      - name: Save build tree cache
+        if: always() && inputs.reuse_build_tree && inputs.cache_mode != '完全重建'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build_dir/target-*
+            build_dir/host
+            staging_dir/target-*
+            staging_dir/host
+          key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-${{ github.run_id }}
+
+      - name: Upload packages artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-legacy-packages-${{ inputs.device }}-${{ github.run_number }}
+          path: |
+            output/*
+            build_log/legacy-package-summary.txt
+            build_log/*.log
+          retention-days: 14
+
+      - name: Publish prerelease (本仓, apk + 公钥)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          files=(output/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::output 为空，跳过本仓预发布"
+            exit 0
+          fi
+          tag="pkgs-legacy-${{ inputs.device }}-r${{ github.run_number }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" \
+              --prerelease \
+              --title "apk $tag" \
+              --notes "device=${{ inputs.device }} run=${{ github.run_number }} commit=${{ github.sha }}；同私钥签名，公钥 public-key.pem(.sha256) 随包发布。"
+          fi
+
+      - name: Publish to apk repository (ufo1cn/ponwrt-apk-repo)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          REPO="ufo1cn/ponwrt-apk-repo"
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::未配置 APK_REPO_TOKEN，跳过跨仓发布（本仓 prerelease 已有产物）"
+            exit 0
+          fi
+          files=(output/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::output 为空，跳过跨仓发布"
+            exit 0
+          fi
+          tag="legacy-${{ inputs.device }}-r${{ github.run_number }}"
+          body="来源仓库 ufo1cn/ponwrt-ZN504-HG5585F；device=${{ inputs.device }}；run=${{ github.run_number }}；commit=${{ github.sha }}；签名私钥与固件同一把，设备装 /etc/apk/keys/public-key.pem 后免 --allow-untrusted。"
+          if gh release view "$tag" -R "$REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" -R "$REPO" --clobber
+          else
+            gh release create "$tag" "${files[@]}" -R "$REPO" \
+              --prerelease --title "apk $tag" --notes "$body"
+          fi
+          echo ">>> 已发布到 https://github.com/$REPO/releases/tag/$tag"
