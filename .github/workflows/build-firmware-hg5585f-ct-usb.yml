@@ -266,6 +266,14 @@ jobs:
 
           # 强制 base-files 重编：build_dir 缓存会保留上一次的 signing key，
           # 不清掉的话镜像里 /etc/apk/keys/public-key.pem 还是旧 key。
+          # 同时在 repositories.d 里留一条（默认注释，避免无外网时 apk update 卡超时）
+          mkdir -p package/base-files/files/etc/apk/repositories.d
+          printf '%s\n' \
+            '# 自建 apk 在线源（与固件同私钥签名）；有外网且能访问 GitHub 时取消下一行注释即可启用' \
+            '# https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt' \
+            > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
+          cat package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
+
           rm -rf build_dir/target-*/base-files* || true
           find build_dir/target-* -maxdepth 3 -name '*base-files*' -path '*stamp*' -exec rm -rf {} + 2>/dev/null || true
           echo ">>> base-files 构建状态已清除"
@@ -313,6 +321,10 @@ jobs:
           f2=$(ls build_dir/target-*/root-*/etc/ponwrt-apk-repo.conf 2>/dev/null | head -n1 || true)
           [ -n "$f2" ] || { echo "::error::镜像内缺 /etc/ponwrt-apk-repo.conf"; exit 1; }
           grep -q 'ufo1cn/ponwrt-apk-repo' "$f2" || { echo "::error::仓库地址内容不对"; exit 1; }
+          f3=$(ls build_dir/target-*/root-*/etc/apk/repositories.d/90-ponwrt-apk-repo.list 2>/dev/null | head -n1 || true)
+          [ -n "$f3" ] || { echo "::error::镜像内缺 90-ponwrt-apk-repo.list"; exit 1; }
+          grep -q 'ponwrt-apk-repo' "$f3" || { echo "::error::repositories.d 里的仓库地址不对"; exit 1; }
+          echo ">>> repositories.d 地址条目也在"
           echo ">>> 镜像自检通过：固定公钥 + 仓库地址都在"
 
       - name: Organize output files
