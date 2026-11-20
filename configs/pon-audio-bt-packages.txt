@@ -1,0 +1,26 @@
+# build-packages-legacy.yml + manifest=configs/pon-audio-bt-packages.txt 的专项清单
+#
+# 目标：在**已带 USB 驱动栈**的 HG5585F-CT USB 版固件上，额外装这几个 apk
+#       就能实现 USB 声卡出声 + USB 蓝牙耳机/音箱（A2DP）出声。**不重编固件**。
+#
+# 固件已有（内核侧，=y 编进 USB 版镜像，此清单不重复编）：
+#   kmod-usb-core / usb2 / usb3 / kmod-usb-xhci-hcd / -mtk
+#   audio-support / kmod-input-core / kmod-sound-core / kmod-usb-audio      -> USB 声卡 UAC
+#   kmod-bluetooth / kmod-btusb / kmod-btbcm / kmod-btmtk / kmod-hci-uart   -> USB 蓝牙适配器
+#   注意：manual 版固件不含上述驱动，装这批包会因缺 kmod 依赖而装不上，只能用 USB 版。
+#
+# 格式：auto|<apk>|<required|optional>；auto 由工作流解析源码目录。
+
+# ---- ALSA 基础（USB 声卡的用户态工具）----
+auto|alsa-lib|required
+auto|alsa-utils|required
+# ---- D-Bus（bluetoothd 的运行时依赖）----
+auto|dbus|required
+auto|libdbus|required
+# ---- BlueZ 用户态（HCI 管理与配对流）----
+auto|bluez-libs|required
+auto|bluez-daemon|required
+auto|bluez-utils|required
+# ---- A2DP 音频通路（本仓自有：arkq/bluez-alsa v4.3.1）----
+auto|bluez-alsa|required
+auto|luci-app-blueaudio|required
