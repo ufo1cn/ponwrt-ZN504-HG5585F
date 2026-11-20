@@ -309,6 +309,21 @@ jobs:
           for f in *; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done
           exit $fail
 
+      - name: Export apk signing public key
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p output
+          # rules.mk: BUILD_KEY_APK_PUB=$(TOPDIR)/public-key.pem，BUILD_KEY_APK_SEC=$(TOPDIR)/private-key.pem
+          # 每次 run 现生成一套密钥，设备只认固件里那把；把本次公钥放进 artifact，
+          # 装包前丢进设备 /etc/apk/keys/ 即可免 --allow-untrusted。
+          if [ -f public-key.pem ]; then
+            cp -f public-key.pem output/public-key.pem
+            sha256sum output/public-key.pem | tee output/public-key.pem.sha256
+          else
+            echo "::warning::本 run 未生成 public-key.pem（命中缓存或未签名），artifact 里不含公钥"
+          fi
+
       - name: Save downloads cache
         if: always() && inputs.cache_mode != '完全重建'
         continue-on-error: true
