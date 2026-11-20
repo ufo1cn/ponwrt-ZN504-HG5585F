@@ -50,7 +50,7 @@ on:
         type: string
       extra_packages:
         description: '临时追加要编的包（逗号分隔，不必改清单；例：samba4-server,avahi-daemon）'
-        required: true
+        required: false
         default: ''
         type: string
       only:
