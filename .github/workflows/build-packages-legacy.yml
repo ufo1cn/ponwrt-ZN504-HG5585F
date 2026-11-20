@@ -43,6 +43,11 @@ on:
         required: true
         default: true
         type: boolean
+      manifest:
+        description: '清单文件路径（默认 legacy；音频蓝牙专项用 configs/pon-audio-bt-packages.txt）'
+        required: true
+        default: 'configs/pon-legacy-packages.txt'
+        type: string
       only:
         description: '只编这些 apk（逗号分隔，all=全部；例：samba4-server,avahi-daemon）'
         required: true
@@ -167,7 +172,7 @@ jobs:
             case "$path" in \#*) continue ;; esac
             sed -i "/^CONFIG_PACKAGE_${apk}=/d;/^# CONFIG_PACKAGE_${apk} is not set/d" .config
             printf 'CONFIG_PACKAGE_%s=m\n' "$apk" >> .config
-          done < configs/pon-legacy-packages.txt
+          done < "${{ inputs.manifest }}"
 
           if [ "${{ inputs.cache_mode }}" != "完全重建" ]; then
             sed -i '/^CONFIG_DEVEL=/d; /^CONFIG_CCACHE=/d' .config
@@ -202,7 +207,7 @@ jobs:
                 miss=$((miss+1))
               fi
             fi
-          done < configs/pon-legacy-packages.txt
+          done < "${{ inputs.manifest }}"
           echo ">>> 未落地必需包数: $miss"
 
       - name: Build host tools and toolchain
@@ -227,7 +232,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p output build_log
-          manifest="configs/pon-legacy-packages.txt"
+          manifest="${{ inputs.manifest }}"
           only="${{ inputs.only }}"
 
           # 源码目录解析：目录名 -> Makefile 里的 Package/<apk> -> PKG_NAME 反查
