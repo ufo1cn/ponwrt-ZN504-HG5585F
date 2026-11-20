@@ -253,41 +253,42 @@ jobs:
           only="${{ inputs.only }}"
           fail=0; summary=""; missing_dirs=""
 
-          # purge_pkg：把某个包的历史构建状态彻底清掉（只有真删到 stamp 才会重编）
-          # 背景：#20 已证实 build_dir/target-*/ser2net-* 与 build_dir/target-*/stamp/ser2net-*
-          # 都删干净后 make 仍 0.05 秒跳过 Build/Compile —— 说明 .installed/.built 在别处。
-          # 这里直接用 make -C <pkg> -pn 让 make 自己吐出 STAMP_* 的真实值，再逐个删。
+          # purge_pkg：彻底清掉某个包的历史构建状态（只删到真正的 stamp 才会重编）
+          # 实测（run 44754949643，ser2net.log）：缓存树恢复出来的 build_dir 里 .built 在、
+          # ipkg-install 却是空的（缓存打包排除了 ipkg*），于是 make 认为已编译完，直接跳到
+          # apk 打包阶段，报 cp: cannot stat .../ipkg-install/usr/bin/ser2net。
+          # 之前用 `make -C <pkg> -pn` 探测 STAMP_* 拿不到任何值（日志里 STAMP_DIR=未探测到），
+          # 因为 package.mk 依赖 TOPDIR，在包目录里跑 -pn 不展开。这里改为按 include/package.mk
+          # 的真实定义直接删：
+          #   STAMP_PREPARED/CONFIGURED/BUILT = $(PKG_BUILD_DIR)/.prepared|.configured|.built
+          #   STAMP_INSTALLED = $(STAGING_DIR)/stamp/.<PKG_DIR_NAME>_installed
+          #   PKG_INSTALL_STAMP = $(STAGING_DIR)/pkginfo/<PKG_DIR_NAME>.default.install
           purge_pkg() {
-            local path="$1" apk="$2" log="$3" sp sd s
+            local path="$1" apk="$2" log="$3" d p
+            d=$(basename "$path")          # = PKG_DIR_NAME
             make "$path/clean" >> "$log" 2>&1 || true
-            # 真实路径探测必须容错：在 set -eo pipefail 下 grep 无匹配就会 exit 1，
-            # 直接把整个 step 打死（#21 就是死在这里 —— ser2net.log 里连一行 STAMP 都没有）
-            sp=$( { make -C "$path" -pn 2>/dev/null \
-                   | grep -E "^STAMP_(CONFIGURED|BUILT|INSTALLED)[ :=]" \
-                   | awk '{print $NF}' | sort -u; } || true )
-            sd=$( { make -C "$path" -pn 2>/dev/null \
-                   | grep -E "^STAMP_DIR[ :=]" | awk '{print $NF}' | sort -u; } || true )
             {
-              echo ">>> $apk stamp 探测（STAMP_DIR=${sd:-未探测到}）："
-              echo "${sp:-未探测到}"
+              echo ">>> purge $apk（PKG_DIR_NAME=$d）"
             } >> "$log" 2>&1 || true
-            # 1) 常规目录/前缀
-            rm -rf build_dir/target-*/"${apk}"-* build_dir/target-*/stamp/"${apk}"-* \
-                   staging_dir/target-*/"${apk}"-* staging_dir/target-*/stamp/"${apk}"-* 2>/dev/null || true
-            # 2) 探测到、且名字含本包名的 stamp
-            for s in $sp; do
-              case "$s" in *"$apk"*)
-                if [ -e "$s" ]; then rm -rf "$s" 2>/dev/null || true; echo "  已删 $s" >> "$log"; fi ;;
-              esac
+            for p in build_dir/target-*/"$d" build_dir/target-*/"$d"-* build_dir/target-*/"$apk" build_dir/target-*/"$apk"-*; do
+              [ -e "$p" ] || continue
+              rm -f "$p"/.prepared* "$p"/.configured* "$p"/.built* "$p"/.dep_files 2>/dev/null || true
+              rm -rf "$p"/ipkg-install "$p"/ipkg-* "$p"/apk-* 2>/dev/null || true
+              echo "  已清 $p 的 .prepared/.configured/.built/ipkg*" >> "$log" 2>&1 || true
             done
-            # 3) 兜底：点前缀隐藏 stamp（.configured/.built/.installed_xxx）与包构建目录
-            find build_dir staging_dir -maxdepth 3 \( -name ".${apk}*" -o -name "${apk}-*" \) -exec rm -rf {} + 2>/dev/null || true
+            rm -f staging_dir/target-*/stamp/."$d"_installed \
+                  staging_dir/target-*/stamp/."$d".*_installed \
+                  staging_dir/target-*/pkginfo/"$d".default.install 2>/dev/null || true
+            find staging_dir -maxdepth 3 \( -name ".${d}_installed" -o -name ".${d}.*_installed" \) -delete 2>/dev/null || true
             {
-              echo "--- 清理后残留："
-              find build_dir staging_dir -maxdepth 3 \( -name ".${apk}*" -o -name "${apk}-*" \) 2>/dev/null || true
+              echo "--- 清理后残留（build_dir）："
+              ls -d build_dir/target-*/"$d" build_dir/target-*/"$d"-* 2>/dev/null || true
+              echo "--- 清理后残留（staging stamp）："
+              find staging_dir -maxdepth 3 -name ".${d}*_installed" 2>/dev/null || true
             } >> "$log" 2>&1 || true
             find bin/packages -type f -name "${apk}-[0-9]*.apk" -delete 2>/dev/null || true
           }
+
 
           while IFS='|' read -r path apk required; do
             [ -n "${path:-}" ] || continue
@@ -309,11 +310,12 @@ jobs:
             ok=0
             # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
             # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
+            : > "$log"
             if [ "$only" != "all" ]; then
               echo ">>> 预先清理 $apk 的历史构建状态" >> "$log"
               purge_pkg "$path" "$apk" "$log"
             fi
-            if make -j"$(nproc)" "$path/compile" 2>&1 | tee "$log"; then
+            if make -j"$(nproc)" "$path/compile" 2>&1 | tee -a "$log"; then
               ok=1
             else
               # 首轮失败：用 make -pn 探测真实 stamp 路径并精确删除，再编一次
