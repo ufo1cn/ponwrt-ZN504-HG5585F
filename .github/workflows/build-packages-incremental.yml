@@ -252,6 +252,33 @@ jobs:
 
           only="${{ inputs.only }}"
           fail=0; summary=""; missing_dirs=""
+
+          # purge_pkg：把某个包的历史构建状态彻底清掉（只有真删到 stamp 才会重编）
+          # 背景：#20 已证实 build_dir/target-*/ser2net-* 与 build_dir/target-*/stamp/ser2net-*
+          # 都删干净后 make 仍 0.05 秒跳过 Build/Compile —— 说明 .installed/.built 在别处。
+          # 这里直接用 make -C <pkg> -pn 让 make 自己吐出 STAMP_* 的真实值，再逐个删。
+          purge_pkg() {
+            local path="$1" apk="$2" log="$3" sp sd s
+            make "$path/clean" >> "$log" 2>&1 || true
+            rm -rf build_dir/target-*/"${apk}"-* build_dir/target-*/stamp/"${apk}"-* \
+                   staging_dir/target-*/"${apk}"-* staging_dir/target-*/stamp/"${apk}"-* 2>/dev/null || true
+            # 只删具体包的 .configured/.built/.installed，绝不动 STAMP_DIR 本身（否则整树重编）
+            sp=$(make -C "$path" -pn 2>/dev/null \
+                 | grep -E "^STAMP_(CONFIGURED|BUILT|INSTALLED)[ :=]" \
+                 | awk '{print $NF}' | sort -u)
+            sd=$(make -C "$path" -pn 2>/dev/null \
+                 | grep -E "^STAMP_DIR[ :=]" | awk '{print $NF}' | sort -u)
+            {
+              echo ">>> $apk stamp 真实路径（make -pn 探测，STAMP_DIR=$sd）："
+              echo "${sp:-（未探测到）}"
+              for s in $sp; do
+                if [ -e "$s" ]; then rm -rf "$s" 2>/dev/null && echo "  已删除 $s"; else echo "  不存在 $s"; fi
+              done
+            } >> "$log"
+            rm -rf build_dir/target-*/"${apk}"-* 2>/dev/null || true
+            find bin/packages -type f -name "${apk}-[0-9]*.apk" -delete 2>/dev/null || true
+          }
+
           while IFS='|' read -r path apk required; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
@@ -270,30 +297,23 @@ jobs:
             log="build_log/${apk}.log"
             echo ">>> 编译 $apk ($path)"
             ok=0
+            # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
+            # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
+            if [ "$only" != "all" ]; then
+              echo ">>> 预先清理 $apk 的历史构建状态" >> "$log"
+              purge_pkg "$path" "$apk" "$log"
+            fi
             if make -j"$(nproc)" "$path/compile" 2>&1 | tee "$log"; then
               ok=1
             else
-              # 增量缓存会连上一轮失败包的半成品一起恢复：STAMP_DIR 里的 .built 在、
-              # PKG_INSTALL_DIR（ipkg-install）却为空，make 认为“已编译”直接跳 Install，
-              # 于是 cp: cannot stat .../ipkg-install/usr/bin/xxx（ser2net 就是这么失败的）。
-              # 只 make clean 不够：clean 只删 PKG_BUILD_DIR，不动 build_dir/<target>/stamp/*/.built，
-              # 所以必须连 stamp 一起删，再编一次。
+              # 首轮失败：用 make -pn 探测真实 stamp 路径并精确删除，再编一次
               echo "" >> "$log"
-              echo ">>> 首轮失败：硬清理 $apk 的 build_dir + stamp + 旧 apk，再编一次" >> "$log"
-              make "$path/clean" >> "$log" 2>&1 || true
-              rm -rf build_dir/target-*/"${apk}"-* build_dir/target-*/stamp/"${apk}"-* \
-                     staging_dir/target-*/"${apk}"-* staging_dir/target-*/stamp/"${apk}"-* 2>/dev/null || true
-              {
-                echo ">>> 清理后残留（应为空）："
-                ls -d build_dir/target-*/"${apk}"-* build_dir/target-*/stamp/"${apk}"-* 2>/dev/null || echo "  已清空"
-                echo ">>> stamp 实际内容（排查用）："
-                find build_dir/target-*/stamp -maxdepth 2 -name "*${apk}*" 2>/dev/null || true
-              } >> "$log"
-              find bin/packages -type f -name "${apk}-[0-9]*.apk" -delete 2>/dev/null || true
+              echo ">>> 首轮失败：探测 STAMP_* 真实路径后精确清理，再编一次" >> "$log"
+              purge_pkg "$path" "$apk" "$log"
               if make -j"$(nproc)" "$path/compile" >> "$log" 2>&1; then
                 ok=2
               else
-                echo ">>> clean 重试仍失败，用 -j1 V=s 取尾部 100 行" >> "$log"
+                echo ">>> 清理重试仍失败，用 -j1 V=s 取尾部 100 行" >> "$log"
                 { make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "$log" || true
                 ok=0
               fi
@@ -302,7 +322,7 @@ jobs:
               hit=$(find bin/packages -type f -name "${apk}-[0-9]*.apk" | head -n 1)
               if [ -n "$hit" ]; then
                 if [ "$ok" = "2" ]; then
-                  summary="${summary}\nOK     $apk -> $hit（clean 重试后成功）"
+                  summary="${summary}\nOK     $apk -> $hit（清理重试后成功）"
                 else
                   summary="${summary}\nOK     $apk -> $hit"
                 fi
