@@ -21,11 +21,16 @@ PKG_BUILD_PARALLEL:=1
 
 include $(INCLUDE_DIR)/package.mk
 
+# ser2net 4.x 的配置是 yaml，configure 里 yaml.h 是硬性检查（run 44666977648 第 15 步 ser2net.log）：
+#   checking for yaml.h... no
+#   configure: error: yaml.h not found, please install libyaml dev package
+# libyaml 由 feeds 的 libs/yaml 提供（PKG_NAME:=yaml，包名 libyaml，Build/InstallDev 会铺 yaml.h + libyaml*.so*），
+# 所以这里把 +libyaml 补进 DEPENDS，并让编译前先把它 InstallDev 到 staging。
 define Package/ser2net
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Serial to TCP proxy (ser2net 4.x, yaml config)
-  DEPENDS:=+gensio +libpthread
+  DEPENDS:=+gensio +libpthread +libyaml
 endef
 
 define Package/ser2net/description
