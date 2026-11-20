@@ -449,6 +449,61 @@ jobs:
             staging_dir/host
           key: ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-${{ github.run_id }}
 
+      - name: Build apk index and publish to apk repo
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          files=(output/*.apk)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::本次没有 apk，跳过索引生成"
+            exit 0
+          fi
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::未配置 APK_REPO_TOKEN，跳过仓库索引推送"
+            exit 0
+          fi
+          APKBIN=""
+          for c in staging_dir/host/bin/apk build_dir/host*/apk-*/apk; do
+            if [ -x "$c" ]; then APKBIN="$c"; break; fi
+          done
+          if [ -z "$APKBIN" ]; then
+            echo "::warning::找不到 host 版 apk 工具，跳过索引生成（apk 仍可单独下载安装）"
+            exit 0
+          fi
+          echo ">>> host apk: $APKBIN"
+          "$APKBIN" --version || true
+          rm -f packages.adb index.err
+          if ! "$APKBIN" index -o packages.adb "${files[@]}" 2>index.err; then
+            cat index.err || true
+            if ! "$APKBIN" index --output packages.adb "${files[@]}"; then
+              echo "::warning::apk index 生成失败，跳过在线源发布"
+              exit 0
+            fi
+          fi
+          ls -l packages.adb
+          echo ">>> packages.adb 生成成功（$(stat -c%s packages.adb) 字节，${#files[@]} 个 apk）"
+
+          # 托管到 ufo1cn/ponwrt-apk-repo 的 repo 分支，保持固定 URL 目录结构
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
+          rm -rf /tmp/apkrepo
+          if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/apkrepo 2>/dev/null; then
+            git clone --depth=1 "$REPO_URL" /tmp/apkrepo
+            git -C /tmp/apkrepo checkout -b repo
+          fi
+          DEST=/tmp/apkrepo/aarch64_cortex-a53/ponwrt
+          mkdir -p "$DEST"
+          cp -f output/*.apk "$DEST"/
+          cp -f packages.adb "$DEST"/
+          ( cd "$DEST" && sha256sum *.apk > SHA256SUMS )
+          git -C /tmp/apkrepo add -A
+          git -C /tmp/apkrepo -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
+            commit -m "repo: run=${{ github.run_number }} device=${{ inputs.device }} apk=${#files[@]}" || true
+          git -C /tmp/apkrepo push origin repo
+          echo ">>> 在线源：https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt"
+
       - name: Upload packages artifact
         if: always()
         uses: actions/upload-artifact@v4
