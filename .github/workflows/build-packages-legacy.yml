@@ -256,15 +256,42 @@ jobs:
           only="${{ inputs.only }}"
 
           # 源码目录解析：目录名 -> Makefile 里的 Package/<apk> -> PKG_NAME 反查
+          # 关键：make 只认 package/feeds/<feed>/<pkg> 这类目标；直接给 feeds/packages/utils/bluez
+          # 会报 "make[1]: *** No rule to make target 'feeds/packages/utils/bluez/compile'"
+          # （legacy run 44752208306 实测，libdbus/bluez-libs/bluez-daemon/bluez-utils 全挂在这）。
           resolve_path() {
-            local apk="$1" hit=""
-            hit=$(find package/feeds package feeds -maxdepth 5 \( -type d -o -type l \) -name "$apk" 2>/dev/null | head -n1)
-            if [ -n "$hit" ] && [ -f "$hit/Makefile" ]; then echo "$hit"; return; fi
+            local apk="$1" hit="" feed cand
+            # 1) feeds install 建立的按「包名」链接：最精确，只编这一个包
+            for feed in $(ls feeds 2>/dev/null); do
+              if [ -e "package/feeds/$feed/$apk" ]; then
+                printf '%s' "package/feeds/$feed/$apk"; return
+              fi
+            done
+            # 2) 目录名直接匹配
+            hit=$(find package/feeds package -maxdepth 5 \( -type d -o -type l \) -name "$apk" 2>/dev/null | head -n1)
+            if [ -n "$hit" ] && [ -f "$hit/Makefile" ]; then printf '%s' "$hit"; return; fi
+            # 3) Makefile 里 define Package/<apk> / PKG_NAME 反查，feeds 路径映射成 package/feeds/<feed>/<dir>
             hit=$(grep -rls --include=Makefile -E "^define[[:space:]]+Package/${apk}\$" package feeds 2>/dev/null | head -n1)
-            if [ -n "$hit" ]; then dirname "$hit"; return; fi
-            hit=$(grep -rls --include=Makefile -E "^PKG_NAME[[:space:]]*[:+]?=[[:space:]]*${apk}[[:space:]]*\$" package feeds 2>/dev/null | head -n1)
-            if [ -n "$hit" ]; then dirname "$hit"; return; fi
-            echo ""
+            if [ -z "$hit" ]; then
+              hit=$(grep -rls --include=Makefile -E "^PKG_NAME[[:space:]]*[:+]?=[[:space:]]*${apk}[[:space:]]*\$" package feeds 2>/dev/null | head -n1)
+            fi
+            if [ -n "$hit" ]; then
+              cand=$(dirname "$hit")
+              case "$cand" in
+                feeds/*)
+                  feed=$(printf '%s' "$cand" | cut -d/ -f2)
+                  hit="package/feeds/$feed/$(basename "$cand")"
+                  if [ ! -e "$hit" ]; then
+                    mkdir -p "package/feeds/$feed"
+                    ln -sfn "$(cd "$cand" && pwd)" "$hit"
+                    echo ">>> 补齐 feeds 链接：$hit -> $(cd "$cand" && pwd)" >&2
+                  fi
+                  ;;
+                *) hit="$cand" ;;
+              esac
+              printf '%s' "$hit"; return
+            fi
+            printf '%s' ""
           }
 
           fail=0; summary=""; skipped=""
@@ -410,9 +437,12 @@ jobs:
           echo ">>> host apk: $APKBIN"
           "$APKBIN" --version || true
           rm -f packages.adb index.err
-          if ! "$APKBIN" index -o packages.adb "${files[@]}" 2>index.err; then
+          # 索引生成必须信任本次签名公钥：公钥就在仓库根 public-key.pem。
+          # 不带 --keys-dir 时 apk v3 直接报 "ERROR: output/xxx.apk: UNTRUSTED signature"
+          # （legacy run 44752208306 实测，于是 packages.adb 一直生不出来）。
+          if ! "$APKBIN" index --keys-dir "$PWD" -o packages.adb "${files[@]}" 2>index.err; then
             cat index.err || true
-            if ! "$APKBIN" index --output packages.adb "${files[@]}"; then
+            if ! "$APKBIN" index --keys-dir "$PWD" --allow-untrusted -o packages.adb "${files[@]}"; then
               echo "::warning::apk index 生成失败，跳过在线源发布"
               exit 0
             fi
