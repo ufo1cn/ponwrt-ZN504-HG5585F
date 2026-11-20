@@ -270,12 +270,23 @@ jobs:
             {
               echo ">>> purge $apk（PKG_DIR_NAME=$d）"
             } >> "$log" 2>&1 || true
+            # run 44771614897（#23）实测：只删 stamp/ipkg* 时 make 仍认为已编译
+            # （compile 段 0.07s、无任何 Build/Compile 输出，直接进 apk 打包，
+            #  报 cp: cannot stat .../ser2net-4.6.0/ipkg-install/usr/bin/ser2net）。
+            # 缓存恢复出来的树里 .built 在、ipkg* 被缓存策略排除，任何"部分清理"
+            # 都可能留下 make 认账的目标；这里整目录删掉（含源码树），只保留 dl/ 的
+            # tarball，强制 prepare → configure → Build/Compile → Build/Install 全链路重跑。
             for p in build_dir/target-*/"$d" build_dir/target-*/"$d"-* build_dir/target-*/"$apk" build_dir/target-*/"$apk"-*; do
               [ -e "$p" ] || continue
-              rm -f "$p"/.prepared* "$p"/.configured* "$p"/.built* "$p"/.dep_files 2>/dev/null || true
-              rm -rf "$p"/ipkg-install "$p"/ipkg-* "$p"/apk-* 2>/dev/null || true
-              echo "  已清 $p 的 .prepared/.configured/.built/ipkg*" >> "$log" 2>&1 || true
+              echo "  整目录删除 $p" >> "$log" 2>&1 || true
+              rm -rf "$p" 2>/dev/null || true
             done
+            # 残留硬校验：删不掉就直接报红，避免下一轮又静默跑过
+            left=$(ls -d build_dir/target-*/"$d"-* build_dir/target-*/"$apk"-* 2>/dev/null || true)
+            if [ -n "$left" ]; then
+              echo "::error::purge 后 build_dir 仍有残留：$left"
+              echo "  残留：$left" >> "$log" 2>&1 || true
+            fi
             rm -f staging_dir/target-*/stamp/."$d"_installed \
                   staging_dir/target-*/stamp/."$d".*_installed \
                   staging_dir/target-*/pkginfo/"$d".default.install 2>/dev/null || true
@@ -340,6 +351,11 @@ jobs:
                 fi
                 cp -f "$hit" output/
               else
+                {
+                  echo "--- 缓存树里该包残余 stamp/ipkg 目录："
+                  ls -ld build_dir/target-*/"$apk"-* build_dir/target-*/"$apk"/.built* 2>/dev/null || echo "(none)"
+                  find staging_dir/target-* -maxdepth 2 -name "*.${apk}*install" 2>/dev/null || true
+                } >> "$log" 2>&1 || true
                 echo "::error::$apk 编译命令成功但没有产出 apk"
                 summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
               fi
