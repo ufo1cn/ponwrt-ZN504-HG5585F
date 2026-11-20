@@ -4,9 +4,16 @@ PKG_NAME:=ser2net
 PKG_VERSION:=4.6.0
 PKG_RELEASE:=1
 
+# 上游 v4.6.0 的 Release 里只有 Ser2Net-4.6.0-windows.exe，没有 ser2net-4.6.0.tar.gz，
+# 所以 releases/download 直链 404、各 mirror 也都没有（run 44660310636 第 15 步 ser2net.log）：
+#   curl: (22) The requested URL returned error: 404 ... Download failed.
+#   No more mirrors to try - giving up.
+#   make[2]: *** [Makefile:44: .../dl/ser2net-4.6.0.tar.gz] Error 2
+# 改用 codeload 的 tag 源码包（与 gensio 同一手法），PKG_HASH 按实际 tarball 重算。
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
-PKG_SOURCE_URL:=https://github.com/cminyard/ser2net/releases/download/v$(PKG_VERSION)
-PKG_HASH:=908675c4eb76c6e9b9187f051a0d6b06e46604b0f926b4e3d065e8a079445454
+PKG_SOURCE_URL:=https://codeload.github.com/cminyard/ser2net/tar.gz/refs/tags
+PKG_SOURCE_URL_FILE:=v$(PKG_VERSION)
+PKG_HASH:=859ffa1e1f08b7bf13134016fed00acfee64c1cc376cc3e1739d2832fd33ef94
 
 PKG_FIXUP:=autoreconf
 PKG_INSTALL:=1
