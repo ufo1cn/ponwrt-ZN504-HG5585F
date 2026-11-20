@@ -279,13 +279,16 @@ jobs:
               # 只 make clean 不够：clean 只删 PKG_BUILD_DIR，不动 build_dir/<target>/stamp/*/.built，
               # 所以必须连 stamp 一起删，再编一次。
               echo "" >> "$log"
-              echo ">>> 首轮失败：清理 $apk 的 build_dir + stamp + 旧 apk，再编一次" >> "$log"
+              echo ">>> 首轮失败：硬清理 $apk 的 build_dir + stamp + 旧 apk，再编一次" >> "$log"
               make "$path/clean" >> "$log" 2>&1 || true
-              for d in build_dir/target-* build_dir/host staging_dir/target-* staging_dir/hostpkg; do
-                [ -d "$d" ] || continue
-                rm -rf "$d"/stamp/*"${apk}"* 2>/dev/null || true
-                find "$d" -maxdepth 1 -name "*${apk}*" ! -name stamp -exec rm -rf {} + 2>/dev/null || true
-              done
+              rm -rf build_dir/target-*/"${apk}"-* build_dir/target-*/stamp/"${apk}"-* \
+                     staging_dir/target-*/"${apk}"-* staging_dir/target-*/stamp/"${apk}"-* 2>/dev/null || true
+              {
+                echo ">>> 清理后残留（应为空）："
+                ls -d build_dir/target-*/"${apk}"-* build_dir/target-*/stamp/"${apk}"-* 2>/dev/null || echo "  已清空"
+                echo ">>> stamp 实际内容（排查用）："
+                find build_dir/target-*/stamp -maxdepth 2 -name "*${apk}*" 2>/dev/null || true
+              } >> "$log"
               find bin/packages -type f -name "${apk}-[0-9]*.apk" -delete 2>/dev/null || true
               if make -j"$(nproc)" "$path/compile" >> "$log" 2>&1; then
                 ok=2
