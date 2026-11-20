@@ -249,6 +249,27 @@ jobs:
           fi
           exit $fail
 
+      - name: Force base-files rebuild + inject apk repo address
+        run: |
+          set -euo pipefail
+          # 仓库地址写进镜像：package/base-files/files/ 就是 rootfs 内容
+          mkdir -p package/base-files/files/etc
+          printf '%s\n' \
+            '# PonWrt apk 包仓库（AN7581 系列，全部 apk 与固件同一把固定私钥签名）' \
+            'REPO=ufo1cn/ponwrt-apk-repo' \
+            'URL=https://github.com/ufo1cn/ponwrt-apk-repo/releases' \
+            'KEY_SHA256=d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed' \
+            '# 设备侧用法：apk add --no-network /tmp/<pkg>.apk' \
+            '# 公钥已在 /etc/apk/keys/public-key.pem，不需要 --allow-untrusted' \
+            > package/base-files/files/etc/ponwrt-apk-repo.conf
+          cat package/base-files/files/etc/ponwrt-apk-repo.conf
+
+          # 强制 base-files 重编：build_dir 缓存会保留上一次的 signing key，
+          # 不清掉的话镜像里 /etc/apk/keys/public-key.pem 还是旧 key。
+          rm -rf build_dir/target-*/base-files* || true
+          find build_dir/target-* -maxdepth 3 -name '*base-files*' -path '*stamp*' -exec rm -rf {} + 2>/dev/null || true
+          echo ">>> base-files 构建状态已清除"
+
       - name: Download package sources
         run: make download -j"$(nproc)"
 
@@ -269,6 +290,30 @@ jobs:
         if: always() && inputs.cache_mode != '不使用缓存'
         run: |
           [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -s || true
+
+      - name: Verify signing key inside image rootfs
+        run: |
+          set -euo pipefail
+          want=d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed
+          got=""
+          for f in build_dir/target-*/root-*/etc/apk/keys/public-key.pem; do
+            [ -f "$f" ] || continue
+            got=$(sha256sum "$f" | awk '{print $1}')
+            echo ">>> rootfs: $f -> $got"
+          done
+          if [ -z "$got" ]; then
+            echo "::error::rootfs 里找不到 /etc/apk/keys/public-key.pem"
+            exit 1
+          fi
+          if [ "$got" != "$want" ]; then
+            echo "::error::镜像内公钥不是固定密钥：got=$got want=$want"
+            echo "::error::说明 base-files 仍然命中了旧缓存，需要把该包彻底重编"
+            exit 1
+          fi
+          f2=$(ls build_dir/target-*/root-*/etc/ponwrt-apk-repo.conf 2>/dev/null | head -n1 || true)
+          [ -n "$f2" ] || { echo "::error::镜像内缺 /etc/ponwrt-apk-repo.conf"; exit 1; }
+          grep -q 'ufo1cn/ponwrt-apk-repo' "$f2" || { echo "::error::仓库地址内容不对"; exit 1; }
+          echo ">>> 镜像自检通过：固定公钥 + 仓库地址都在"
 
       - name: Organize output files
         run: |
