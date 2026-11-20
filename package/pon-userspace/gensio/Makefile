@@ -28,6 +28,8 @@ include $(INCLUDE_DIR)/package.mk
 # package-defaults.mk 第 81 行用 `CONFIGURE_ARGS = ...` 重新定义，写在 include 之前会被整段覆盖
 # （上一轮写成 := 放 include 前，因此这一版仍去探测 python 并失败）。
 CONFIGURE_ARGS += \
+	--with-glib=no \
+	--with-cplusplus=no \
 	--without-python \
 	--without-tcl \
 	--without-swig \
@@ -35,6 +37,11 @@ CONFIGURE_ARGS += \
 	--without-mdns \
 	--without-openipmi \
 	--without-sctp
+# run 44637532192 第 15 步 gensio 编译/安装都过了，卡在打包依赖校验：
+#   Package gensio is missing dependencies for the following libraries:
+#   libglib-2.0.so.0 / libgthread-2.0.so.0 / libstdc++.so.6
+# 原因是 configure 在 staging 里探测到 glib 与 C++ 就编了 glib/c++ 包装库。ser2net 只用 C 版
+# libgensio，这两个包装库用不上：显式关掉，既不新增 libglib2/libstdcpp 依赖，也不动校验本身。
 
 define Package/gensio
   SECTION:=libs
