@@ -251,20 +251,42 @@ jobs:
               summary="${summary}\nFAIL   $apk（源码目录缺失 $path）"; fail=1
               continue
             fi
+            log="build_log/${apk}.log"
             echo ">>> 编译 $apk ($path)"
-            if make -j"$(nproc)" "$path/compile" 2>&1 | tee "build_log/${apk}.log"; then
+            ok=0
+            if make -j"$(nproc)" "$path/compile" 2>&1 | tee "$log"; then
+              ok=1
+            else
+              # 增量缓存会连上一轮失败包的半成品一起恢复：build_dir 里 .built* stamp 在、
+              # PKG_INSTALL_DIR 却是空的，make 认为“已编译”直接跳到 Install，
+              # 于是报 cp: cannot stat .../ipkg-install/usr/bin/xxx（ser2net 就是这么失败的）。
+              # 清掉该包自己的 build_dir 再编一次，拆掉历史失败留下的死锁。
+              echo "" >> "$log"
+              echo ">>> 首轮失败：疑似增量缓存残留半成品状态，执行 make $path/clean 后重编" >> "$log"
+              make "$path/clean" >> "$log" 2>&1 || true
+              if make -j"$(nproc)" "$path/compile" >> "$log" 2>&1; then
+                ok=2
+              else
+                echo ">>> clean 重试仍失败，用 -j1 V=s 取尾部 100 行" >> "$log"
+                { make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "$log" || true
+                ok=0
+              fi
+            fi
+            if [ "$ok" -ge 1 ]; then
               hit=$(find bin/packages -type f -name "${apk}-[0-9]*.apk" | head -n 1)
               if [ -n "$hit" ]; then
-                summary="${summary}\nOK     $apk -> $hit"
+                if [ "$ok" = "2" ]; then
+                  summary="${summary}\nOK     $apk -> $hit（clean 重试后成功）"
+                else
+                  summary="${summary}\nOK     $apk -> $hit"
+                fi
                 cp -f "$hit" output/
               else
                 echo "::error::$apk 编译命令成功但没有产出 apk"
                 summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
               fi
             else
-              echo "::error::$apk 编译失败，日志 build_log/${apk}.log"
-              { echo; echo ">>> 并行编译看不到原始错误，用 -j1 V=s 复跑取尾部 100 行"; \
-                make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "build_log/${apk}.log" || true
+              echo "::error::$apk 编译失败，日志 $log"
               summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
             fi
           done < "$manifest"
