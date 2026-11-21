@@ -322,6 +322,11 @@ jobs:
               continue
             fi
             log="build_log/${apk}.log"
+            echo ">>> 编译 $apk ($path)"
+            ok=0
+            # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
+            # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
+            : > "$log"
             # 诊断：ser2net 这种「purge 干净了仍 0.0x 秒跳打包」的情况，要先确认该包
             # 在 .config 与包元数据里是真的存在；不在的话 compile 只是空转，打包必然报
             # cp: cannot stat .../ipkg-install/...
@@ -335,11 +340,6 @@ jobs:
                 echo "    tmp/.packageinfo 不存在"
               fi
             } >> "$log" 2>&1 || true
-            echo ">>> 编译 $apk ($path)"
-            ok=0
-            # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
-            # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
-            : > "$log"
             # 缓存树可能「stamp 在、build_dir/ipkg-install 不在」，这种包无论 only 取
             # 什么值都必须先清干净，否则 make 直接跳到打包阶段（run 44830801575 的 ser2net）。
             bd=""
@@ -350,7 +350,9 @@ jobs:
               echo ">>> 预先清理 $apk 的历史构建状态（build_dir=${bd:-无}）" >> "$log"
               purge_pkg "$path" "$apk" "$log"
             fi
-            if make -j"$(nproc)" "$path/compile" 2>&1 | tee -a "$log"; then
+            # 首轮就用 V=s：非 verbose 时包内 prepare/configure/build 的实际动作不可见，
+            # 只剩一句 ERROR: package/... failed to build，定位不了「为什么直接跳打包」。
+            if make -j"$(nproc)" V=s "$path/compile" 2>&1 | tee -a "$log"; then
               ok=1
             else
               # 首轮失败：用 make -pn 探测真实 stamp 路径并精确删除，再编一次
