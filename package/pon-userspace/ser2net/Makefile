@@ -19,13 +19,15 @@ PKG_FIXUP:=autoreconf
 PKG_INSTALL:=1
 PKG_BUILD_PARALLEL:=1
 
-# ser2net 4.6.0 的 autotools 安装规则把守护进程装到 $(sbindir)（实测落到 ipkg-install/usr/sbin/），
-# 而本包 install 配方与 files/ser2net.init（procd command /usr/bin/ser2net）都按 /usr/bin 走，
-# 于是打包阶段直接 cp: cannot stat .../ipkg-install/usr/bin/ser2net（run 44875389715 第 16 步）。
-# 显式把 sbindir 对齐到 /usr/bin，让实际安装路径与 init/配方一致。
-CONFIGURE_ARGS += --sbindir=/usr/bin
 
 include $(INCLUDE_DIR)/package.mk
+
+# ser2net 4.6.0 的 autotools 安装规则把守护进程装到 $(sbindir)（实测落到 ipkg-install/usr/sbin/），
+# 而本包 install 配方与 files/ser2net.init（procd command /usr/bin/ser2net）都按 /usr/bin 走，
+# 于是打包阶段直接 cp: cannot stat .../ipkg-install/usr/bin/ser2net（run 44875389715 第 16 步；必须写在 include package.mk 之后，
+# 否则被 package.mk 里 CONFIGURE_ARGS:= 的整段赋值覆盖——run #28 里 configure 仍是 --sbindir=/usr/sbin）。
+# 显式把 sbindir 对齐到 /usr/bin，让实际安装路径与 init/配方一致。
+CONFIGURE_ARGS += --sbindir=/usr/bin
 
 # ser2net 4.x 的配置是 yaml，configure 里 yaml.h 是硬性检查（run 44666977648 第 15 步 ser2net.log）：
 #   checking for yaml.h... no
