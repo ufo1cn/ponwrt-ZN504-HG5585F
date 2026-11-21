@@ -253,49 +253,54 @@ jobs:
           only="${{ inputs.only }}"
           fail=0; summary=""; missing_dirs=""
 
-          # purge_pkg：彻底清掉某个包的历史构建状态（只删到真正的 stamp 才会重编）
-          # 实测（run 44754949643，ser2net.log）：缓存树恢复出来的 build_dir 里 .built 在、
-          # ipkg-install 却是空的（缓存打包排除了 ipkg*），于是 make 认为已编译完，直接跳到
-          # apk 打包阶段，报 cp: cannot stat .../ipkg-install/usr/bin/ser2net。
-          # 之前用 `make -C <pkg> -pn` 探测 STAMP_* 拿不到任何值（日志里 STAMP_DIR=未探测到），
-          # 因为 package.mk 依赖 TOPDIR，在包目录里跑 -pn 不展开。这里改为按 include/package.mk
-          # 的真实定义直接删：
-          #   STAMP_PREPARED/CONFIGURED/BUILT = $(PKG_BUILD_DIR)/.prepared|.configured|.built
-          #   STAMP_INSTALLED = $(STAGING_DIR)/stamp/.<PKG_DIR_NAME>_installed
-          #   PKG_INSTALL_STAMP = $(STAGING_DIR)/pkginfo/<PKG_DIR_NAME>.default.install
+          # purge_pkg：把某个包的历史构建状态彻底清干净。
+          # run 44830801575（#24）实测：make "$path/clean" + 删 build_dir 目录 + 删
+          # staging/stamp/.<name>_installed，三样都做完，compile 仍只用 0.07s 就跳到
+          # apk 打包阶段（cp: cannot stat .../ipkg-install/usr/bin/ser2net）。
+          # 说明 make 认账的 stamp 既不在 build_dir/<pkg>-<ver>/.built，也不叫
+          # .<name>_installed。这里改成按包名递归删掉 staging_dir / build_dir 下
+          # 一切 ".<dir>_*"、".<dir>.*" 形式的 stamp（不限后缀、不限深度），
+          # 删完做硬校验，有残留直接报红，不再静默跳过。
           purge_pkg() {
-            local path="$1" apk="$2" log="$3" d p
-            d=$(basename "$path")          # = PKG_DIR_NAME
-            make "$path/clean" >> "$log" 2>&1 || true
+            local path="$1" apk="$2" log="$3" d bd left
+            d=$(basename "$path")
+            bd=""
+            for cand in build_dir/target-*/"$d" build_dir/target-*/"$d"-*; do
+              [ -e "$cand" ] && { bd="$cand"; break; }
+            done
             {
-              echo ">>> purge $apk（PKG_DIR_NAME=$d）"
+              echo ">>> purge $apk（PKG_DIR_NAME=$d，build_dir=${bd:-无}）"
+              echo "--- purge 前 stamp 现存："
+              find staging_dir build_dir \( -name ".${d}_*" -o -name ".${d}.*" \) -print 2>/dev/null || true
             } >> "$log" 2>&1 || true
-            # run 44771614897（#23）实测：只删 stamp/ipkg* 时 make 仍认为已编译
-            # （compile 段 0.07s、无任何 Build/Compile 输出，直接进 apk 打包，
-            #  报 cp: cannot stat .../ser2net-4.6.0/ipkg-install/usr/bin/ser2net）。
-            # 缓存恢复出来的树里 .built 在、ipkg* 被缓存策略排除，任何"部分清理"
-            # 都可能留下 make 认账的目标；这里整目录删掉（含源码树），只保留 dl/ 的
-            # tarball，强制 prepare → configure → Build/Compile → Build/Install 全链路重跑。
+            if [ -n "$bd" ]; then
+              make "$path/clean" >> "$log" 2>&1 || true
+            fi
+            find staging_dir build_dir \( -name ".${d}_*" -o -name ".${d}.*" \) -exec rm -rf {} + 2>/dev/null || true
             for p in build_dir/target-*/"$d" build_dir/target-*/"$d"-* build_dir/target-*/"$apk" build_dir/target-*/"$apk"-*; do
               [ -e "$p" ] || continue
               echo "  整目录删除 $p" >> "$log" 2>&1 || true
               rm -rf "$p" 2>/dev/null || true
             done
-            # 残留硬校验：删不掉就直接报红，避免下一轮又静默跑过
-            left=$(ls -d build_dir/target-*/"$d"-* build_dir/target-*/"$apk"-* 2>/dev/null || true)
-            if [ -n "$left" ]; then
-              echo "::error::purge 后 build_dir 仍有残留：$left"
-              echo "  残留：$left" >> "$log" 2>&1 || true
-            fi
             rm -f staging_dir/target-*/stamp/."$d"_installed \
                   staging_dir/target-*/stamp/."$d".*_installed \
-                  staging_dir/target-*/pkginfo/"$d".default.install 2>/dev/null || true
-            find staging_dir -maxdepth 3 \( -name ".${d}_installed" -o -name ".${d}.*_installed" \) -delete 2>/dev/null || true
+                  staging_dir/target-*/pkginfo/"$d".*.install 2>/dev/null || true
+            # 残留硬校验：stamp 删不干净就报红，避免下一轮又静默跳过编译
+            left=$(find staging_dir build_dir \( -name ".${d}_*" -o -name ".${d}.*" \) 2>/dev/null | head -n 5)
+            if [ -n "$left" ]; then
+              echo "::error::purge 后 stamp 仍残留：$left"
+              echo "  残留：$left" >> "$log" 2>&1 || true
+            fi
+            left=$(ls -d build_dir/target-*/"$d"-* 2>/dev/null | head -n 5 || true)
+            if [ -n "$left" ]; then
+              echo "::error::purge 后 build_dir 仍残留：$left"
+              echo "  残留：$left" >> "$log" 2>&1 || true
+            fi
             {
               echo "--- 清理后残留（build_dir）："
               ls -d build_dir/target-*/"$d" build_dir/target-*/"$d"-* 2>/dev/null || true
-              echo "--- 清理后残留（staging stamp）："
-              find staging_dir -maxdepth 3 -name ".${d}*_installed" 2>/dev/null || true
+              echo "--- 清理后残留（stamp）："
+              find staging_dir build_dir \( -name ".${d}_*" -o -name ".${d}.*" \) -print 2>/dev/null | head -n 10 || true
             } >> "$log" 2>&1 || true
             find bin/packages -type f -name "${apk}-[0-9]*.apk" -delete 2>/dev/null || true
           }
@@ -322,8 +327,14 @@ jobs:
             # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
             # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
             : > "$log"
-            if [ "$only" != "all" ]; then
-              echo ">>> 预先清理 $apk 的历史构建状态" >> "$log"
+            # 缓存树可能「stamp 在、build_dir/ipkg-install 不在」，这种包无论 only 取
+            # 什么值都必须先清干净，否则 make 直接跳到打包阶段（run 44830801575 的 ser2net）。
+            bd=""
+            for cand in build_dir/target-*/"$(basename "$path")" build_dir/target-*/"$(basename "$path")"-*; do
+              [ -e "$cand" ] && { bd="$cand"; break; }
+            done
+            if [ -z "$bd" ] || [ ! -d "$bd/ipkg-install" ]; then
+              echo ">>> 预先清理 $apk 的历史构建状态（build_dir=${bd:-无}）" >> "$log"
               purge_pkg "$path" "$apk" "$log"
             fi
             if make -j"$(nproc)" "$path/compile" 2>&1 | tee -a "$log"; then
