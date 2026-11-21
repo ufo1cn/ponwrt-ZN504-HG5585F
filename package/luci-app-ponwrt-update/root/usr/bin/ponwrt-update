@@ -1,0 +1,376 @@
+#!/bin/sh
+#
+# PonWrt 固件更新：检查索引 / 下载镜像 / 刷写。
+# CLI 与 LuCI 后端共用这一份逻辑，保证两条路径行为一致。
+#
+#   ponwrt-update status              本地版本 + 当前更新设置
+#   ponwrt-update check               检查仓库里有没有新固件（人类可读）
+#   ponwrt-update download            按仓库索引下载镜像（后台，带 sha256 校验）
+#   ponwrt-update apply [--wipe]      刷写已下载并校验过的镜像
+#   ponwrt-update rpc <method> [json] LuCI 后端入口，输出 JSON
+#
+# 出站方式由 /etc/config/ponwrt_update 的 mode 决定：
+#   direct       直连，显式 --noproxy '*'（系统里残留 http_proxy 也不会误走代理）
+#   proxy        显式 --proxy <proxy>（rpcd/LuCI 进程环境里没有 http_proxy，必须显式传）
+#   transparent  透明代理（TUN / nftables redir 已生效），这里同样按直连发请求
+#
+set -u
+
+JSHN=/usr/share/libubox/jshn.sh
+VF=/etc/ponwrt-version
+STATE=/tmp/ponwrt-update.state
+DLDIR=/tmp/ponwrt-fw
+IDX_DEFAULT="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/fw"
+
+vget() { sed -n "s/^$1=//p" "$VF" 2>/dev/null | head -n1; }
+uget() { uci -q get "ponwrt_update.settings.$1" 2>/dev/null || true; }
+
+mode() {
+	case "$(uget mode)" in
+	direct | proxy | transparent) uget mode ;;
+	*) echo direct ;;
+	esac
+}
+
+proxy_url() {
+	[ "$(mode)" = proxy ] || return 0
+	p_url=$(uget proxy)
+	[ -n "$p_url" ] || p_url="${https_proxy:-${http_proxy:-}}"
+	[ -n "$p_url" ] && printf '%s' "$p_url"
+	return 0
+}
+
+idx_base() {
+	ib=$(uget index_base)
+	[ -n "$ib" ] || ib="$IDX_DEFAULT"
+	printf '%s' "${ib%/}"
+}
+
+# fetch <curl 参数...>：按当前模式决定代理行为
+fetch() {
+	if [ "$(mode)" = proxy ]; then
+		fp=$(proxy_url)
+		if [ -n "$fp" ]; then
+			curl --proxy "$fp" "$@"
+		else
+			curl "$@"
+		fi
+	else
+		curl --noproxy '*' "$@"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# 下载状态文件：页面靠它显示进度、判断能否刷写
+# ---------------------------------------------------------------------------
+st_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
+
+st_set() { # state part path total name sha error
+	{
+		printf 'state=%s\n' "$1"
+		printf 'part=%s\n' "$2"
+		printf 'path=%s\n' "$3"
+		printf 'total=%s\n' "${4:-0}"
+		printf 'name=%s\n' "$5"
+		printf 'sha=%s\n' "$6"
+		printf 'error=%s\n' "${7:-}"
+	} >"$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
+}
+
+bytes_now() {
+	[ -n "${1:-}" ] && [ -f "$1" ] || { echo 0; return 0; }
+	stat -c %s "$1" 2>/dev/null || echo 0
+}
+
+# ---------------------------------------------------------------------------
+# JSON 方法（LuCI 后端，rpcd 调用）
+# ---------------------------------------------------------------------------
+rpc_status() {
+	. "$JSHN"
+	json_init
+	json_add_boolean ok 1
+	json_add_string device "$(vget device)"
+	json_add_string feature_class "$(vget feature_class)"
+	json_add_string commit "$(vget commit_short)"
+	json_add_string built_at "$(vget built_at)"
+	json_add_string local_run "$(vget run)"
+	json_add_string kernel "$(uname -r 2>/dev/null)"
+	json_add_string mode "$(mode)"
+	json_add_string proxy "$(uget proxy)"
+	json_add_string index_base "$(idx_base)"
+	json_add_string state "$(st_get state)"
+	json_add_string filename "$(st_get name)"
+	json_add_string path "$(st_get path)"
+	json_add_string sha256_expected "$(st_get sha)"
+	json_add_string error "$(st_get error)"
+	ds_total=$(st_get total); [ -n "$ds_total" ] || ds_total=0
+	ds_bytes=$(bytes_now "$(st_get part)")
+	json_add_int total "$ds_total"
+	json_add_int bytes "$ds_bytes"
+	json_dump
+}
+
+# 探测本机正在跑的代理（mihomo / sing-box / xray 的常见配置位置），给页面填端口用
+rpc_detect() {
+	. "$JSHN"
+	json_init
+	json_add_array items
+	add_hit() { # 名称 端口
+		[ -n "${2:-}" ] || return 0
+		json_add_string "" "$1:$2"
+	}
+	dt=$(sed -n 's/^[[:space:]]*mixed-port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /etc/mihomo/config.yaml 2>/dev/null | head -n1)
+	add_hit "mihomo(混合端口)" "$dt"
+	dt=$(sed -n 's/^[[:space:]]*port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /etc/mihomo/config.yaml 2>/dev/null | head -n1)
+	add_hit "mihomo(http 端口)" "$dt"
+	dt=$(grep -o '"listen_port"[[:space:]]*:[[:space:]]*[0-9][0-9]*' /etc/sing-box/config.json 2>/dev/null | head -n1 | grep -o '[0-9][0-9]*$')
+	add_hit "sing-box(混合端口)" "$dt"
+	dt=$(grep -o '"port"[[:space:]]*:[[:space:]]*[0-9][0-9]*' /etc/xray/config.json 2>/dev/null | head -n1 | grep -o '[0-9][0-9]*$')
+	add_hit "xray" "$dt"
+	json_close_array
+	json_add_string mode "$(mode)"
+	json_add_string proxy "$(uget proxy)"
+	json_dump
+}
+
+rpc_check() {
+	dev=$(vget device)
+	cur=$(vget run)
+	. "$JSHN"
+	json_init
+	if [ -z "$dev" ]; then
+		json_add_boolean ok 0
+		json_add_string error "缺少 /etc/ponwrt-version 里的 device 字段"
+		json_dump
+		return 0
+	fi
+	tmp=$(mktemp /tmp/ponwrt-idx.XXXXXX 2>/dev/null) || {
+		json_add_boolean ok 0
+		json_add_string error "无法创建临时文件"
+		json_dump
+		return 0
+	}
+	iurl="$(idx_base)/$dev.json"
+	if ! fetch -fsSL --connect-timeout 10 --retry 2 "$iurl" -o "$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		json_add_boolean ok 0
+		json_add_string error "拉取更新索引失败：$iurl"
+		json_add_string hint "设备访问不了这个地址；改用代理模式或透明代理，或者换成自建镜像地址"
+		json_add_string index_url "$iurl"
+		json_dump
+		return 0
+	fi
+	r_tag=$(jsonfilter -i "$tmp" -e '@.tag' 2>/dev/null)
+	r_run=$(jsonfilter -i "$tmp" -e '@.run' 2>/dev/null)
+	r_name=$(jsonfilter -i "$tmp" -e '@.sysupgrade.name' 2>/dev/null)
+	r_sha=$(jsonfilter -i "$tmp" -e '@.sysupgrade.sha256' 2>/dev/null)
+	r_url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
+	rm -f "$tmp"
+	if [ -z "${r_run:-}" ]; then
+		json_add_boolean ok 0
+		json_add_string error "索引内容无法解析（tag=${r_tag:-空}）"
+		json_add_string index_url "$iurl"
+		json_dump
+		return 0
+	fi
+	up=0
+	[ "$r_run" -gt "${cur:-0}" ] 2>/dev/null && up=1
+	json_add_boolean ok 1
+	json_add_string tag "$r_tag"
+	json_add_string local_run "${cur:-0}"
+	json_add_string remote_run "$r_run"
+	json_add_string name "$r_name"
+	json_add_string url "$r_url"
+	json_add_string sha256 "$r_sha"
+	json_add_string index_url "$iurl"
+	json_add_boolean update "$up"
+	json_dump
+}
+
+rpc_download() {
+	. "$JSHN"
+	json_load "${1:-}" 2>/dev/null
+	json_get_var d_url url
+	json_get_var d_sha sha256
+	json_init
+	if [ -z "${d_url:-}" ]; then
+		json_add_boolean ok 0
+		json_add_string error "缺少镜像下载地址"
+		json_dump
+		return 0
+	fi
+	d_name=$(basename "$d_url")
+	mkdir -p "$DLDIR" 2>/dev/null || {
+		json_add_boolean ok 0
+		json_add_string error "无法创建 $DLDIR（/tmp 是 tmpfs，检查是否写满）"
+		json_dump
+		return 0
+	}
+	d_part="$DLDIR/$d_name.part"
+	d_path="$DLDIR/$d_name"
+	rm -f "$d_part" "$d_path"
+	d_total=$(fetch -sIL --connect-timeout 10 "$d_url" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{v=$2} END{print v+0}')
+	[ -n "$d_total" ] || d_total=0
+	st_set downloading "$d_part" "$d_path" "$d_total" "$d_name" "${d_sha:-}" ""
+	(
+		if ! fetch -f -L --connect-timeout 20 --retry 3 -o "$d_part" "$d_url"; then
+			st_set error "" "$d_path" "$d_total" "$d_name" "${d_sha:-}" "下载失败"
+			exit 1
+		fi
+		d_got=$(sha256sum "$d_part" 2>/dev/null | awk '{print $1}')
+		if [ -n "${d_sha:-}" ] && [ "$d_got" != "$d_sha" ]; then
+			st_set sha_mismatch "$d_part" "$d_path" "$d_total" "$d_name" "$d_sha" "sha256 不匹配（实际 $d_got）"
+			exit 1
+		fi
+		mv -f "$d_part" "$d_path"
+		st_set ready "" "$d_path" "$d_total" "$d_name" "${d_sha:-}" ""
+	) >/dev/null 2>&1 &
+	json_add_boolean ok 1
+	json_add_string message "已开始后台下载 $d_name"
+	json_dump
+}
+
+rpc_apply() {
+	. "$JSHN"
+	json_load "${1:-}" 2>/dev/null
+	json_get_var a_wipe wipe
+	case "${a_wipe:-0}" in 1 | true | on | yes) a_wipe=1 ;; *) a_wipe=0 ;; esac
+	a_path=$(st_get path)
+	json_init
+	if [ "$(st_get state)" != ready ] || [ -z "${a_path:-}" ] || [ ! -f "$a_path" ]; then
+		json_add_boolean ok 0
+		json_add_string error "没有已下载并校验过的镜像，请先下载"
+		json_dump
+		return 0
+	fi
+	(
+		sleep 3
+		if [ "$a_wipe" = 1 ]; then sysupgrade -n "$a_path"; else sysupgrade "$a_path"; fi
+	) >/dev/null 2>&1 &
+	json_add_boolean ok 1
+	json_add_string message "已开始刷写，设备会自动重启"
+	json_dump
+}
+
+rpc_set() {
+	. "$JSHN"
+	json_load "${1:-}" 2>/dev/null
+	json_get_var s_mode mode
+	json_get_var s_proxy proxy
+	json_get_var s_idx index_base
+	json_init
+	case "${s_mode:-}" in
+	direct | proxy | transparent) uci set ponwrt_update.settings.mode="$s_mode" ;;
+	esac
+	uci set ponwrt_update.settings.proxy="${s_proxy:-}" 2>/dev/null
+	[ -n "${s_idx:-}" ] && uci set ponwrt_update.settings.index_base="$s_idx" 2>/dev/null
+	uci commit ponwrt_update 2>/dev/null
+	json_add_boolean ok 1
+	json_add_string mode "$(mode)"
+	json_add_string proxy "$(uget proxy)"
+	json_add_string index_base "$(idx_base)"
+	json_dump
+}
+
+# ---------------------------------------------------------------------------
+# 命令行输出
+# ---------------------------------------------------------------------------
+out_mode() {
+	if [ "$(mode)" = proxy ]; then
+	  printf '%s（%s）' "$(mode)" "$(proxy_url)"
+	else
+	  printf '%s' "$(mode)"
+	fi
+}
+
+cli_status() {
+	echo "设备：$(vget device)（能力 $(vget feature_class)）"
+	echo "本地版本：commit $(vget commit_short)，run $(vget run)，构建于 $(vget built_at)"
+	echo "内核：$(uname -r 2>/dev/null)"
+	echo "出站方式：$(out_mode)"
+	echo "索引地址：$(idx_base)"
+	st_st=$(st_get state)
+	[ -n "$st_st" ] && echo "下载状态：$st_st $(st_get error)"
+}
+
+cli_check() {
+	[ -f "$VF" ] || { echo "缺少 $VF：这不是 PonWrt 固件，或构建时没写入版本戳"; exit 1; }
+	dev=$(vget device)
+	cur=$(vget run)
+	echo "本地：device=${dev:-?} run=${cur:-0} 能力=$(vget feature_class)"
+	echo "出站：$(out_mode)；索引：$(idx_base)"
+	[ -n "$dev" ] || { echo "版本戳里没有 device 字段"; exit 1; }
+	tmp=$(mktemp) || exit 1
+	if ! fetch -fsSL --connect-timeout 10 --retry 2 "$(idx_base)/$dev.json" -o "$tmp"; then
+		echo "拉取更新索引失败：$(idx_base)/$dev.json"
+		rm -f "$tmp"
+		exit 2
+	fi
+	r_tag=$(jsonfilter -i "$tmp" -e '@.tag' 2>/dev/null)
+	r_run=$(jsonfilter -i "$tmp" -e '@.run' 2>/dev/null)
+	r_name=$(jsonfilter -i "$tmp" -e '@.sysupgrade.name' 2>/dev/null)
+	r_sha=$(jsonfilter -i "$tmp" -e '@.sysupgrade.sha256' 2>/dev/null)
+	r_url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
+	rm -f "$tmp"
+	[ -n "${r_run:-}" ] || { echo "索引内容无法解析（tag=${r_tag:-空}）"; exit 3; }
+	if [ "$r_run" -gt "${cur:-0}" ] 2>/dev/null; then
+		echo
+		echo "发现新固件：$r_tag（run $r_run，本地 run ${cur:-0}）"
+		echo "  镜像：$r_name"
+		echo "  下载：$r_url"
+		echo "  sha256：$r_sha"
+		echo
+		echo "图形化：LuCI → 系统 → 固件更新；命令行：ponwrt-update download 然后 ponwrt-update apply"
+		return 0
+	fi
+	echo "已是最新固件（索引 tag=$r_tag run=$r_run）"
+}
+
+cli_download() {
+	dev=$(vget device)
+	[ -n "$dev" ] || { echo "缺少 device 字段"; exit 1; }
+	tmp=$(mktemp) || exit 1
+	if ! fetch -fsSL --connect-timeout 10 --retry 2 "$(idx_base)/$dev.json" -o "$tmp"; then
+		echo "索引拉取失败"; rm -f "$tmp"; exit 2
+	fi
+	r_url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
+	r_sha=$(jsonfilter -i "$tmp" -e '@.sysupgrade.sha256' 2>/dev/null)
+	rm -f "$tmp"
+	[ -n "${r_url:-}" ] || { echo "索引里没有下载地址"; exit 3; }
+	rpc_download "{\"url\":\"$r_url\",\"sha256\":\"$r_sha\"}"
+	echo
+	echo "后台下载中：看 ponwrt-update status 或 LuCI 页面的进度"
+}
+
+cli_apply() {
+	a_wipe=0
+	[ "${1:-}" = "--wipe" ] && a_wipe=1
+	rpc_apply "{\"wipe\":$a_wipe}"
+	echo
+}
+
+case "${1:-check}" in
+status) cli_status ;;
+check) cli_check ;;
+download) cli_download ;;
+apply)
+	shift
+	cli_apply "${1:-}"
+	;;
+rpc)
+	shift
+	case "${1:-}" in
+	status) rpc_status ;;
+	detect) rpc_detect ;;
+	check) rpc_check ;;
+	set) rpc_set "${2:-}" ;;
+	download) rpc_download "${2:-}" ;;
+	apply) rpc_apply "${2:-}" ;;
+	*) echo '{"ok":false,"error":"unknown method"}' ;;
+	esac
+	;;
+*)
+	echo "用法：ponwrt-update {status|check|download|apply [--wipe]}"
+	exit 1
+	;;
+esac
