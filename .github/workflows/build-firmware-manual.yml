@@ -1,4 +1,4 @@
-name: Build PonWrt (HG5585F-CT & HG5382A) manual
+name: Build PonWrt (HG5585F-CT / HG5382A / XG-040G-MD) manual
 
 # ==============================================================================
 # 本文件基于上游 .github/workflows/build-zn504.yml 修改而来（步骤顺序、依赖列表、
@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       devices:
-        description: '编译机型'
+        description: '编译机型（both = HG5585F-CT + HG5382A 两台一起）'
         required: true
         default: 'both'
         type: choice
@@ -30,6 +30,8 @@ on:
           - 'both'
           - 'hg5585f-ct'
           - 'hg5382a'
+          # Nokia XG-040G-MD：有 USB、无内置无线，机型符号是 nokia_xg-040g-md-ubi
+          - 'xg040md'
       upload_release:
         description: 'Upload firmware to GitHub Releases'
         required: false
@@ -55,7 +57,7 @@ env:
 
 jobs:
   build:
-    name: Build HG5585F-CT & HG5382A
+    name: Build HG5585F-CT / HG5382A / XG-040G-MD
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
@@ -155,6 +157,8 @@ jobs:
           case "${{ inputs.devices }}" in
             hg5585f-ct) DEVICES="fiberhome_hg5585f-ct" ;;
             hg5382a)    DEVICES="fiberhome_hg5382a" ;;
+            # Nokia XG-040G-MD（UBI 版，带 USB；另有 -usb-sfp 变体不编）
+            xg040md)    DEVICES="nokia_xg-040g-md-ubi" ;;
             *)          DEVICES="fiberhome_hg5585f-ct fiberhome_hg5382a" ;;
           esac
 
@@ -169,6 +173,80 @@ jobs:
               || { echo "::error::机型符号未落地: CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${d}=y"; exit 1; }
           done
           echo ">>> 机型锁定完成（未再执行 defconfig）"
+
+          # ------------------------------------------------------------------
+          # XG-040G-MD（有 USB、没有内置无线）的配置改写
+          #
+          #   1) 关内置 WiFi：configs/release.config 把 kmod-mt7915e /
+          #      kmod-mt7916-firmware 设成 =y（那是 HG5585F 的 MT7916 内置无线），
+          #      本机没有这组硬件，留着只会白占镜像 + 开机报找不到设备。
+          #      只关 PACKAGE 符号，保留 kmod-mt76-core/-connac（USB 无线网卡
+          #      mt76x0u / mt76x2u / mt7921u 都依赖它们）。
+          #   2) 补全 USB 栈：全部按 =m 编（编出来的 apk 进仓库 usb 能力目录，
+          #      设备上 apk add 按需装；镜像本身由机型 profile 带 kmod-usb3 /
+          #      xhci / storage，插上就能用）。
+          #   3) USB 无线网卡驱动也要编（插 USB 网卡用），同样 =m 进 usb 目录。
+          #
+          # 全部只改 .config 文本，不再 defconfig（否则机型行会被重算掉）。
+          # ------------------------------------------------------------------
+          if [ "${{ inputs.devices }}" = "xg040md" ]; then
+            echo ">>> XG-040G-MD：关闭内置 WiFi，补全 USB 栈与 USB 无线网卡驱动"
+            for s in kmod-mt7915e kmod-mt7916-firmware; do
+              sed -i "/^CONFIG_PACKAGE_${s}=/d; /^CONFIG_MODULE_DEFAULT_${s}=/d" .config
+              printf '# CONFIG_PACKAGE_%s is not set\n' "$s" >> .config
+            done
+            wifi_leak=0
+            for s in kmod-mt7915e kmod-mt7916-firmware kmod-mt7915-firmware kmod-mt7615e; do
+              if grep -q "^CONFIG_PACKAGE_${s}=[ym]" .config; then
+                echo "::error::XG-040G-MD 仍然把内置 WiFi 包选中了: ${s}=$(grep "^CONFIG_PACKAGE_${s}=" .config | cut -d= -f2)"
+                wifi_leak=1
+              fi
+            done
+            [ "$wifi_leak" = "0" ] || exit 1
+
+            # USB 主机/网络/串口/存储/摄像头/IP 透传 + USB 无线网卡
+            USB_PKGS="kmod-usb2 kmod-usb-common kmod-usbmon \
+              kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm \
+              kmod-usb-net-cdc-mbim kmod-usb-net-cdc-eem kmod-usb-net-cdc-subset \
+              kmod-usb-net-rndis kmod-usb-net-ipheth kmod-usb-net-huawei-cdc-ncm \
+              kmod-usb-net-qmi-wwan kmod-usb-net-qmi-wwan-quectel kmod-usb-net-qmi-wwan-fibocom \
+              kmod-usb-net-rtl8152 kmod-usb-net-rtl8152-vendor kmod-usb-net-asix \
+              kmod-usb-net-asix-ax88179 kmod-usb-net-aqc111 kmod-usb-net-smsc95xx \
+              kmod-usb-net-lan78xx kmod-usb-net-sr9700 kmod-usb-net-hso \
+              kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x \
+              kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-serial-option \
+              kmod-usb-serial-qualcomm kmod-usb-serial-mos7720 kmod-usb-serial-mos7840 \
+              kmod-usb-serial-simple kmod-usb-storage-extras kmod-usb-hid \
+              kmod-usb-acm kmod-usb-printer kmod-usb-wdm \
+              kmod-usbip kmod-usbip-client kmod-usbip-server usbip usbutils \
+              kmod-ath9k-htc kmod-carl9170 kmod-mt7601u kmod-mt76x0u kmod-mt76x2u \
+              kmod-mt7663u kmod-mt7921u kmod-rtl8xxxu kmod-rtl8188eu kmod-rtl8192cu \
+              kmod-rtl8192du kmod-rtw88-8723du kmod-rtw88-8812au kmod-rtw88-8814au \
+              kmod-rtw88-8821au kmod-rtw88-8821cu kmod-rtw88-8822bu kmod-rtw88-8822cu"
+            n_ok=0; n_miss=0
+            for s in $USB_PKGS; do
+              # defconfig 之后每个「仓库里真实存在」的包符号都会出现在 .config，
+              # 所以先确认符号存在，避免写进一个不存在的包名（会静默不编）
+              if ! grep -qE "^(# )?CONFIG_PACKAGE_${s}(=| is not set)" .config; then
+                echo "::warning::符号不存在，跳过: ${s}（packages feed 里没有这个包）"
+                n_miss=$((n_miss+1)); continue
+              fi
+              grep -q "^CONFIG_PACKAGE_${s}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$s" >> .config
+              n_ok=$((n_ok+1))
+            done
+            echo ">>> USB 包已选中(含原有): $n_ok 个，符号不存在跳过: $n_miss 个"
+            # 硬校验：内置 WiFi 已关、USB 核心栈在、USB 无线网卡驱动在
+            for s in kmod-mt7915e kmod-mt7916-firmware; do
+              grep -q "^# CONFIG_PACKAGE_${s} is not set" .config \
+                || { echo "::error::XG-040G-MD 没有真正关掉内置 WiFi: ${s}"; exit 1; }
+            done
+            for s in kmod-usb-core kmod-usb3 kmod-usb-xhci-hcd kmod-usb-storage \
+                     kmod-usb-net kmod-rtl8xxxu kmod-mt76x2u kmod-rtw88-8822bu; do
+              grep -q "^CONFIG_PACKAGE_${s}=[my]" .config \
+                || { echo "::error::XG-040G-MD 缺少必需的 USB 符号: ${s}"; exit 1; }
+            done
+            echo ">>> XG-040G-MD 配置改写完成（内置 WiFi 已关，USB 栈与 USB 无线网卡驱动已在列）"
+          fi
 
       - name: Force base-files rebuild + inject apk repo address
         run: |
@@ -190,6 +268,7 @@ jobs:
           case "${{ inputs.devices }}" in
             hg5585f-ct) TARGET_DEVS="fiberhome_hg5585f-ct" ;;
             hg5382a)    TARGET_DEVS="fiberhome_hg5382a" ;;
+            xg040md)    TARGET_DEVS="nokia_xg-040g-md-ubi" ;;
             *)          TARGET_DEVS="fiberhome_hg5585f-ct fiberhome_hg5382a"
                         echo "::warning::devices=both 时 repositories.d 按两台机型能力的并集写（镜像内容仍按各自 config，不受影响）；要严格隔离请单机型运行" ;;
           esac
@@ -361,7 +440,7 @@ jobs:
       - name: Organize output files
         run: |
           mkdir -p output
-          find bin/targets/airoha/an7581/ -type f \( -name "*zn504*" -o -name "*hg5585f-ct*" -o -name "*hg5585f-cu*" -o -name "*hg5382a*" \) ! -name "*usb-sfp*" \( -name "*sysupgrade.itb" -o -name "*recovery.itb" -o -name "*manifest" \) -exec cp {} output/ \;
+          find bin/targets/airoha/an7581/ -type f \( -name "*zn504*" -o -name "*hg5585f-ct*" -o -name "*hg5585f-cu*" -o -name "*hg5382a*" -o -name "*xg-040g-md*" \) ! -name "*usb-sfp*" \( -name "*sysupgrade.itb" -o -name "*recovery.itb" -o -name "*manifest" \) -exec cp {} output/ \;
           cd output
           for file in $(ls * 2>/dev/null); do
             [ -f "$file" ] && sha256sum "$file" > "${file}.sha256"
@@ -382,6 +461,11 @@ jobs:
             hg5382a|both)
               ls output/*hg5382a*sysupgrade*.itb >/dev/null 2>&1 \
                 || { echo "::error::缺少 HG5382A 固件（预期 *hg5382a*sysupgrade*.itb）"; fail=1; } ;;
+          esac
+          case "${{ inputs.devices }}" in
+            xg040md)
+              ls output/*xg-040g-md*sysupgrade*.itb >/dev/null 2>&1 \
+                || { echo "::error::缺少 XG-040G-MD 固件（预期 *xg-040g-md*sysupgrade*.itb）"; fail=1; } ;;
           esac
           exit $fail
 
@@ -409,7 +493,7 @@ jobs:
           body: |
             ## 本次手动构建
 
-            - 机型：${{ inputs.devices }}（HG5585F-CT / HG5382A）
+            - 机型：${{ inputs.devices }}（hg5585f-ct / hg5382a / xg040md=nokia_xg-040g-md-ubi）
             - 配置来源：`configs/an7581.config` + `configs/release.config`（不含自有包选装）
             - 内核能力来源：`target/linux/airoha/an7581/config-6.18` 的基础设施符号
             - 工作流基线：上游 `build-zn504.yml`（仅改触发方式、机型锁定与产物收集）
