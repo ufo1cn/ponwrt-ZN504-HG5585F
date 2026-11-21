@@ -84,20 +84,22 @@ jobs:
               if SRC_RUN:
                   out = subprocess.check_output(
                       ['gh', 'api', 'repos/%s/actions/runs/%s' % (SRC, SRC_RUN),
-                       '--jq', '[.id,.run_number,.head_sha,.name,.conclusion,.created_at]|@tsv'],
+                       '--jq', '[.id,.run_number,.head_sha,.name,.conclusion,.created_at,.path]|@tsv'],
                       text=True).strip()
               else:
                   out = subprocess.check_output(
                       ['gh', 'api',
                        'repos/%s/actions/workflows/%s/runs?status=success&per_page=1' % (SRC, wf),
-                       '--jq', '.workflow_runs[0] | [.id,.run_number,.head_sha,.name,.conclusion,.created_at]|@tsv'],
+                       '--jq', '.workflow_runs[0] | [.id,.run_number,.head_sha,.name,.conclusion,.created_at,.path]|@tsv'],
                       text=True).strip()
               if not out:
                   sys.exit('机型 %s 找不到可用的成功构建（%s）' % (dev, wf))
-              rid, rnum, sha, name, concl, created = out.split('\t')
+              rid, rnum, sha, name, concl, created, path = out.split('\t')
               if concl and concl != 'success':
                   sys.exit('源 run %s 结论是 %s，不是 success' % (rid, concl))
-              rows.append((dev, wf, rid, rnum, sha, created))
+              # 指定 source_run 时可能是 manual 之类的入口，索引里要写实际入口文件名
+              wf_used = path.rsplit('/', 1)[-1] if path.endswith('.yml') else wf
+              rows.append((dev, wf_used, rid, rnum, sha, created))
 
           with open('plan.tsv', 'w', encoding='utf-8') as f:
               for r in rows:
