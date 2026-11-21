@@ -267,7 +267,7 @@ jobs:
               if [ "$required" = "optional" ]; then
                 echo "    SKIP $apk（可选，未落地）"
               else
-                echo "::warning::符号未落地 $apk（defconfig 后为 =y 或不存在的包名）"
+                echo "::warning::符号未落地 $apk（编译阶段会补选 CONFIG_PACKAGE_${apk}=m）"
                 miss=$((miss+1))
               fi
             fi
@@ -321,9 +321,16 @@ jobs:
             hit=$(find package/feeds package -maxdepth 5 \( -type d -o -type l \) -name "$apk" 2>/dev/null | head -n1)
             if [ -n "$hit" ] && [ -f "$hit/Makefile" ]; then printf '%s' "$hit"; return; fi
             # 3) Makefile 里 define Package/<apk> / PKG_NAME 反查，feeds 路径映射成 package/feeds/<feed>/<dir>
-            hit=$(grep -rls --include=Makefile -E "^define[[:space:]]+Package/${apk}\$" package feeds 2>/dev/null | head -n1)
+            #    需要兼容两种写法：define Package/<apk>/<sub>（子包配置块）、以及
+            #    多包共用一个目录时的 $(eval $(call BuildPackage,<apk>))（如 net/frp 产 frpc/frps）。
+            #    run 136844207118（legacy #8）里 avahi-daemon / frpc 就是因为这两种写法漏判，
+            #    报「源码目录未找到」。
+            hit=$(grep -rls --include=Makefile -E "^define[[:space:]]+Package/${apk}(/[A-Za-z0-9_.-]+)?[[:space:]]*\$" package feeds 2>/dev/null | head -n1)
             if [ -z "$hit" ]; then
               hit=$(grep -rls --include=Makefile -E "^PKG_NAME[[:space:]]*[:+]?=[[:space:]]*${apk}[[:space:]]*\$" package feeds 2>/dev/null | head -n1)
+            fi
+            if [ -z "$hit" ]; then
+              hit=$(grep -rls --include=Makefile -E "BuildPackage[,[:space:]]+${apk}([[:space:]]*)[,)]" package feeds 2>/dev/null | head -n1)
             fi
             if [ -n "$hit" ]; then
               cand=$(dirname "$hit")
@@ -366,6 +373,14 @@ jobs:
               echo "::error::必需包 $apk 的源码目录未找到"
               summary="${summary}\nFAIL   $apk（源码目录未找到）"; fail=1
               continue
+            fi
+
+            # 包没在 .config 里选中（=m）时，OpenWrt 只编源码、不产出 apk —— legacy #8
+            # 的 avahi-daemon / frpc / ffmpeg 都是「符号未落地」→「无 apk 产出」。
+            # 这里补选成 =m（追加即可；不能再 defconfig，否则机型行会被重算掉）。
+            if ! grep -q "^CONFIG_PACKAGE_${apk}=" .config; then
+              printf 'CONFIG_PACKAGE_%s=m\n' "$apk" >> .config
+              echo ">>> 补选 CONFIG_PACKAGE_${apk}=m（原未选中；不补只会编源码、不产出 apk）"
             fi
 
             echo ">>> 编译 $apk ($path)"
