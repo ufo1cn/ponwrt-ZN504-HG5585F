@@ -1,0 +1,375 @@
+name: Publish packages to apk repository
+# 把三条包构建工作流（incremental / legacy / extra）产出的 apk 统一搬进
+# ufo1cn/ponwrt-apk-repo 的 repo 分支，按 ponwrt-k<kver>/<能力>/ 落位，并重建签名索引。
+# 构建工作流本身不再 push apk-repo（避免三处各写一份推送/索引逻辑）。
+#
+# 硬校验（任何一条不过就停，不静默放行）：
+#   1) 产物自带的 public-key.pem 指纹必须是固定私钥派生的那把；
+#   2) 用 host apk 以 keys-dir 强制验签（不传 --allow-untrusted），验不过就列出包名。
+#      ADB 包无法事后重签，验不过只能带着固定私钥重编。
+run-name: 发布 apk ${{ inputs.groups }} / ${{ inputs.device }}${{ inputs.dry_run && '（dry-run）' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '用哪个机型的构建产物（ABI 相同，只影响可用的包集合）'
+        type: choice
+        options:
+          - hg5585f-ct
+          - hg5382a
+          - both
+        default: hg5585f-ct
+      groups:
+        description: '发布哪些分组'
+        type: choice
+        options:
+          - all
+          - incremental
+          - legacy
+          - extra
+        default: all
+      source_runs:
+        description: '指定源 run（格式 incremental=30,legacy=11,extra=12；留空=各取最近一次成功）'
+        type: string
+        default: ''
+      kver:
+        description: '内核版本（决定目录 ponwrt-k<kver>；留空=按源码树推断）'
+        type: string
+        default: ''
+      prune:
+        description: '先清空目标能力目录再写（true=仓库只留本次内容；false=覆盖同名、保留其它包）'
+        type: boolean
+        default: false
+      dry_run:
+        description: '只下载与验签，不写仓库'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pkg-publish-${{ inputs.device }}-${{ inputs.groups }}
+  cancel-in-progress: false
+
+env:
+  SRC_REPO: ${{ github.repository }}
+  DST_REPO: ufo1cn/ponwrt-apk-repo
+  IDX_BRANCH: repo
+  FIXED_PUB_SHA256: d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout source (configs / 内核版本推断)
+        uses: actions/checkout@v4
+
+      - name: Resolve publish plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEV: ${{ inputs.device }}
+          GROUPS: ${{ inputs.groups }}
+          RUNS: ${{ inputs.source_runs }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          REPO = os.environ['SRC_REPO']
+          dev_in = os.environ['DEV']
+          groups_in = os.environ['GROUPS']
+          runs_in = os.environ.get('RUNS', '').strip()
+
+          DEVICES = ['hg5585f-ct', 'hg5382a'] if dev_in == 'both' else [dev_in]
+          MAP = {
+              'incremental': ('build-packages-incremental.yml', 'PonWrt-packages-'),
+              'legacy': ('build-packages-legacy.yml', 'PonWrt-legacy-packages-'),
+              'extra': ('build-packages-extra.yml', 'PonWrt-extra-packages-'),
+          }
+          groups = list(MAP) if groups_in == 'all' else [groups_in]
+
+          pinned = {}
+          for kv in runs_in.replace(';', ',').split(','):
+              if '=' in kv:
+                  k, v = kv.split('=', 1)
+                  pinned[k.strip()] = v.strip()
+
+          def gh(*args):
+              r = subprocess.run(['gh'] + list(args), capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(r.stderr, file=sys.stderr)
+                  sys.exit(1)
+              return r.stdout
+
+          def artifacts(run_id):
+              raw = gh('api', f'repos/{REPO}/actions/runs/{run_id}/artifacts?per_page=100')
+              return [a['name'] for a in json.loads(raw)['artifacts']]
+
+          plan = []
+          for g in groups:
+              wf, prefix = MAP[g]
+              for dev in DEVICES:
+                  want = f'{prefix}{dev}-'
+                  hit = []
+                  if g in pinned:
+                      run_id = pinned[g]
+                      names = artifacts(run_id)
+                      hit = [n for n in names if n.startswith(want)]
+                  else:
+                      run_id = None
+                      raw = gh('api', f'repos/{REPO}/actions/workflows/{wf}/runs?per_page=30&status=success')
+                      for r in json.loads(raw)['workflow_runs']:
+                          names = artifacts(r['id'])
+                          hit = [n for n in names if n.startswith(want)]
+                          if hit:
+                              run_id = r['id']
+                              break
+                  if not hit:
+                      print(f'::error::{g}/{dev}：找不到带 {want}* 产物的成功 run（指定 run 里也没有）', file=sys.stderr)
+                      sys.exit(1)
+                  plan.append({'group': g, 'device': dev, 'run_id': run_id, 'artifact': hit[0], 'workflow': wf})
+                  print(f'>>> {g}/{dev}: run={run_id} artifact={hit[0]}', file=sys.stderr)
+
+          with open('/tmp/plan.json', 'w', encoding='utf-8') as fh:
+              json.dump(plan, fh, ensure_ascii=False, separators=(',', ':'))
+          PY
+          echo ">>> plan:"
+          cat /tmp/plan.json
+
+      - name: Install fixed apk signing key
+        env:
+          APK_SIGNING_PRIVATE_KEY: ${{ secrets.APK_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${APK_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::仓库未配置 APK_SIGNING_PRIVATE_KEY：发布端必须用同一把私钥签索引"
+            exit 1
+          fi
+          printf '%s\n' "$APK_SIGNING_PRIVATE_KEY" > private-key.pem
+          chmod 600 private-key.pem
+          openssl ec -in private-key.pem -pubout -out public-key.pem
+          got=$(sha256sum public-key.pem | cut -d' ' -f1)
+          echo ">>> 私钥派生公钥指纹：$got"
+          if [ "$got" != "$FIXED_PUB_SHA256" ]; then
+            echo "::error::私钥派生公钥指纹 $got 与固定指纹不一致"
+            exit 1
+          fi
+
+      - name: Download artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p in
+          while IFS= read -r row; do
+            grp=$(echo "$row" | jq -r '.group')
+            dev=$(echo "$row" | jq -r '.device')
+            rid=$(echo "$row" | jq -r '.run_id')
+            art=$(echo "$row" | jq -r '.artifact')
+            echo ">>> 下载 $grp/$dev run=$rid $art"
+            gh run download "$rid" -R "$SRC_REPO" -n "$art" -D "in/$grp-$dev"
+          done < <(jq -c '.[]' /tmp/plan.json)
+          find in -maxdepth 3 -type d | sort
+
+      - name: Verify signing key and package signatures
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          APKBIN=""
+          bad=0
+          for d in in/*/; do
+            gd=$(basename "$d")
+            apks=( "$d"output/*.apk )
+            echo ">>> $gd：${#apks[@]} 个 apk"
+            if [ -f "$d"output/public-key.pem ]; then
+              got=$(sha256sum "$d"output/public-key.pem | cut -d' ' -f1)
+              if [ "$got" != "$FIXED_PUB_SHA256" ]; then
+                echo "::error::$gd 的 public-key.pem 指纹 $got 与固定指纹不一致（这批包不是用现在的私钥签的）"
+                bad=1
+              else
+                echo ">>> $gd 公钥指纹一致"
+              fi
+            else
+              echo "::error::$gd 产物里没有 public-key.pem，无法核对签名密钥"
+              bad=1
+            fi
+            if [ -z "$APKBIN" ] && [ -x "$d"pubtool/apk ]; then
+              APKBIN="${d}pubtool/apk"
+            fi
+          done
+          if [ -z "$APKBIN" ]; then
+            echo "::error::产物里没有 host apk（pubtool/apk）：请用改造后的工作流重跑一次包构建，再跑本工作流"
+            exit 1
+          fi
+          chmod +x "$APKBIN"
+          "$APKBIN" --version || true
+          mkdir -p keys && cp -f public-key.pem keys/
+          # 强制验签：不传 --allow-untrusted，keys-dir 里只有固定公钥
+          if ! "$APKBIN" mkndx --root "$PWD/keys" --keys-dir "$PWD/keys" --output /tmp/verify.adb \
+                $(ls in/*/output/*.apk) 2>/tmp/verify.err; then
+            echo "::error::签名校验失败：以下包不是用固定私钥签的（ADB 包无法事后重签，只能重编）"
+            sed -n '1,200p' /tmp/verify.err
+            exit 1
+          fi
+          echo ">>> 全部 apk 通过固定公钥验签（$(ls in/*/output/*.apk | wc -l) 个）"
+          if [ "$bad" != "0" ]; then
+            echo "::error::公钥核对未通过，停止发布"
+            exit 1
+          fi
+
+      - name: Resolve kernel version
+        id: kver
+        env:
+          KVER_IN: ${{ inputs.kver }}
+        run: |
+          set -uo pipefail
+          KVER="${KVER_IN:-}"
+          if [ -z "$KVER" ]; then
+            pv=$(awk -F':=' '/^KERNEL_PATCHVER/ {print $2; exit}' target/linux/airoha/Makefile | tr -d '[:space:]')
+            suf=$(awk -v p="$pv" '$1=="LINUX_VERSION-"p {gsub(/ /,"",$3); print $3; exit}' "target/linux/generic/kernel-$pv" 2>/dev/null || true)
+            KVER="${pv}${suf}"
+          fi
+          [ -n "$KVER" ] || { echo "::error::无法确定内核版本"; exit 1; }
+          echo ">>> 目标目录 ponwrt-k$KVER"
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+
+      - name: Stage apks by device capability
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          FEAT_FILE="configs/pon-feature-packages.txt"
+          feature_of() {
+            local b feat pats p
+            b=$(basename "$1")
+            if [ -f "$FEAT_FILE" ]; then
+              while IFS='|' read -r feat pats; do
+                case "$feat" in ''|'#'*) continue ;; esac
+                for p in $pats; do
+                  case "$b" in $p) echo "$feat"; return ;; esac
+                done
+              done < "$FEAT_FILE"
+            fi
+            echo common
+          }
+          rm -rf stage && mkdir -p stage
+          for f in in/*/output/*.apk; do
+            feat=$(feature_of "$f")
+            mkdir -p "stage/$feat"
+            cp -f "$f" "stage/$feat/"
+          done
+          echo ">>> 分组结果：$(for d in stage/*/; do echo -n "$(basename "$d")=$(ls -1 "$d"*.apk | wc -l) "; done)"
+
+      - name: Publish to apk repository
+        if: inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::未配置 APK_REPO_TOKEN，无法写入 $DST_REPO"
+            exit 1
+          fi
+          APKBIN=""
+          for c in in/*/pubtool/apk; do
+            if [ -x "$c" ]; then APKBIN="$c"; break; fi
+          done
+          [ -n "$APKBIN" ] || { echo "::error::找不到 host apk（pubtool/apk）"; exit 1; }
+          chmod +x "$APKBIN"
+          KVER="${{ steps.kver.outputs.kver }}"
+          PRUNE="${{ inputs.prune }}"
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${DST_REPO}.git"
+          rm -rf repo
+          if ! git clone --depth=1 --branch "$IDX_BRANCH" "$REPO_URL" repo 2>/tmp/clone.err; then
+            git clone --depth=1 "$REPO_URL" repo
+            git -C repo checkout -b "$IDX_BRANCH"
+          fi
+          git -C repo config user.email ci@ponwrt
+          git -C repo config user.name ponwrt-ci
+
+          # 公钥是设备侧信任锚，必须与本次签名一致
+          if [ -f repo/public-key.pem ]; then
+            old=$(sha256sum repo/public-key.pem | cut -d' ' -f1)
+            if [ "$old" != "$FIXED_PUB_SHA256" ]; then
+              echo ">>> 仓库里的 public-key.pem 与固定公钥不一致，更新"
+              cp -f public-key.pem repo/public-key.pem
+            fi
+          else
+            cp -f public-key.pem repo/public-key.pem
+          fi
+
+          for d in stage/*/; do
+            feat=$(basename "$d")
+            DEST="repo/aarch64_cortex-a53/ponwrt-k${KVER}/$feat"
+            mkdir -p "$DEST"
+            if [ "$PRUNE" = "true" ]; then
+              echo ">>> prune：清空 ponwrt-k${KVER}/$feat"
+              rm -f "$DEST"/*.apk "$DEST/packages.adb" "$DEST/SHA256SUMS"
+            fi
+            for f in "$d"*.apk; do
+              b=$(basename "$f")
+              if [ -f "$DEST/$b" ]; then
+                old=$(sha256sum "$DEST/$b" | cut -d' ' -f1)
+                new=$(sha256sum "$f" | cut -d' ' -f1)
+                if [ "$old" = "$new" ]; then echo "    相同，跳过 $b"; continue; fi
+                echo "    覆盖 $b（内容不同）"
+              fi
+              cp -f "$f" "$DEST/"
+            done
+          done
+
+          # 逐能力重建索引：对目录里真实存在的 apk 全量做，索引与内容永远一致
+          for d in stage/*/; do
+            feat=$(basename "$d")
+            DEST="repo/aarch64_cortex-a53/ponwrt-k${KVER}/$feat"
+            apks=( "$DEST"/*.apk )
+            if [ ${#apks[@]} -eq 0 ]; then continue; fi
+            if ! "$APKBIN" mkndx --root "$PWD/keys" --keys-dir "$PWD/keys" \
+                 --sign "$PWD/private-key.pem" --output "$DEST/packages.adb" "${apks[@]}" 2>"/tmp/idx-$feat.err"; then
+              cat "/tmp/idx-$feat.err"
+              echo "::error::$feat 索引生成/签名失败"
+              exit 1
+            fi
+            ( cd "$DEST" && sha256sum ./*.apk > SHA256SUMS )
+            echo ">>> ponwrt-k${KVER}/$feat：$(ls -1 "$DEST"/*.apk | wc -l) 个 apk，索引 $(stat -c%s "$DEST/packages.adb") 字节"
+          done
+
+          git -C repo add -A
+          if git -C repo diff --cached --quiet; then
+            echo ">>> 与仓库现状一致，无需提交"
+            exit 0
+          fi
+          git -C repo commit -m "publish: run=${{ github.run_number }} dev=${{ inputs.device }} groups=${{ inputs.groups }} k=$KVER"
+          pushed=0
+          for i in 1 2 3; do
+            if git -C repo push origin "$IDX_BRANCH"; then pushed=1; break; fi
+            echo ">>> 推送被拒，第 $i 次 rebase 重试"
+            git -C repo fetch origin "$IDX_BRANCH" && git -C repo rebase "origin/$IDX_BRANCH" || true
+          done
+          if [ "$pushed" != "1" ]; then
+            echo "::error::推送 apk 仓库失败"
+            exit 1
+          fi
+          echo ">>> 已发布：https://github.com/$DST_REPO/tree/$IDX_BRANCH/aarch64_cortex-a53/ponwrt-k${KVER}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### apk 发布结果"
+            echo ""
+            echo "| 分组 | 设备 | 源 run | 产物 |"
+            echo "|---|---|---|---|"
+            jq -r '.[] | "| \(.group) | \(.device) | \(.run_id) | \(.artifact) |"' /tmp/plan.json 2>/dev/null || true
+            echo ""
+            if [ -d stage ]; then
+              echo "分组目录："
+              echo '```'
+              for d in stage/*/; do echo "$(basename "$d"): $(ls -1 "$d"*.apk 2>/dev/null | wc -l) 个"; done
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
