@@ -4,7 +4,7 @@
 # mihomo-meta / mihomo-alpha 由 inputs.mihomo 门控（互 PROVIDES/CONFLICTS，只能选一个）。
 
 # ---- iptv（源码 feeds/iptv，yveming/openwrt-iptv）----
-package/feeds/iptv/iptv|kmod-iptv|required
+# kmod-iptv 不在这里编：改由固件流程编译并随 kmods-* 预发布交付（见 configs/features/kmod-repo.config）
 package/feeds/iptv/luci-app-iptv|luci-app-iptv|required
 package/feeds/iptv/luci-i18n-iptv-zh-cn|luci-i18n-iptv-zh-cn|optional
 
