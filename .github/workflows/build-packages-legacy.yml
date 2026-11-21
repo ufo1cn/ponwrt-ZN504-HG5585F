@@ -64,6 +64,15 @@ on:
         default: true
         type: boolean
 
+      source_mode:
+        description: '源码对齐方式（追固件源码=按最后一次固件 commit 编，保证 kmod ABI 一致）'
+        required: true
+        default: '追固件源码'
+        type: choice
+        options:
+          - '追固件源码'
+          - '用本仓HEAD'
+
 jobs:
   build:
     name: Build legacy packages (${{ inputs.device }})
@@ -74,6 +83,48 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Align source tree with last firmware build
+        run: |
+          set -euo pipefail
+          mode="${{ inputs.source_mode }}"
+          fw_url="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/firmware.json"
+          fw_commit=""; fw_kver=""; fw_device=""
+          if curl -fsSL --max-time 30 "$fw_url" -o /tmp/fwmeta.json 2>/dev/null; then
+            fw_commit=$(python3 -c 'import json;d=json.load(open("/tmp/fwmeta.json"));print(d.get("ponwrt_commit",""))' 2>/dev/null || true)
+            fw_kver=$(python3 -c 'import json;d=json.load(open("/tmp/fwmeta.json"));print(d.get("kernel_version",""))' 2>/dev/null || true)
+            fw_device=$(python3 -c 'import json;d=json.load(open("/tmp/fwmeta.json"));print(d.get("devices",""))' 2>/dev/null || true)
+          else
+            echo "::warning::apk-repo 里还没有 meta/firmware.json（固件侧还没发布基线），本次按本仓 HEAD 编译"
+          fi
+          cur=$(git rev-parse HEAD)
+          echo ">>> 固件基线：commit=${fw_commit:-无} kernel=${fw_kver:-无} devices=${fw_device:-无}"
+          echo ">>> 当前源码树：commit=$cur"
+          if [ "$mode" = "追固件源码" ] && [ -n "$fw_commit" ] && [ "$fw_commit" != "$cur" ]; then
+            echo "::warning::源码树与最后一次固件不一致（固件 $fw_commit / 本树 $cur），按固件版本切源码，保证 kmod ABI 与固件一致"
+            if ! git fetch --depth=1 origin "$fw_commit" 2>/dev/null; then
+              echo ">>> 单 commit 浅取失败，回退完整 fetch"
+              git fetch --unshallow origin master 2>/dev/null || git fetch origin master 2>/dev/null || true
+            fi
+            if git cat-file -e "${fw_commit}^{commit}" 2>/dev/null; then
+              git checkout -f "$fw_commit"
+              echo ">>> 已切到固件源码 $(git rev-parse HEAD)"
+            else
+              echo "::error::拿不到固件构建用的 commit $fw_commit（源码对不齐，kmod 会 ABI 不匹配），中止"
+              exit 1
+            fi
+          elif [ "$mode" = "追固件源码" ] && [ -n "$fw_commit" ]; then
+            echo ">>> 源码树已与固件一致（$cur），无需切换"
+          fi
+          {
+            echo "aligned_commit=$(git rev-parse HEAD)"
+            echo "firmware_commit=${fw_commit:-none}"
+            echo "firmware_kernel=${fw_kver:-none}"
+            echo "firmware_device=${fw_device:-none}"
+            echo "source_mode=$mode"
+          } > .ci-source-commit
+          cat .ci-source-commit
+
 
       - name: Free build space
         run: |
@@ -113,10 +164,9 @@ jobs:
             build_dir/host
             staging_dir/target-*
             staging_dir/host
-          key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-${{ github.run_id }}
+          key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-${{ github.run_id }}
           restore-keys: |
-            ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-
-            ponwrt-tree-${{ inputs.device }}-
+            ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-
 
       - name: Restore downloads cache
         if: inputs.cache_mode != '完全重建'
@@ -408,7 +458,7 @@ jobs:
             build_dir/host
             staging_dir/target-*
             staging_dir/host
-          key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-${{ github.run_id }}
+          key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-${{ github.run_id }}
 
       - name: Build apk index and publish to apk repo
         if: always()
@@ -417,6 +467,16 @@ jobs:
         run: |
           set -uo pipefail
           shopt -s nullglob
+          # 内核版本：优先读本次编出的 kernel.release；没编内核时按源码树里的
+          # KERNEL_PATCHVER + LINUX_VERSION-<pv> 推出来（apk 的兼容键就是它）
+          KVER=$(cat build_dir/target-*/linux-*/include/config/kernel.release 2>/dev/null | head -n1 || true)
+          if [ -z "$KVER" ]; then
+            pv=$(awk -F':=' '/^KERNEL_PATCHVER/ {print $2; exit}' target/linux/airoha/Makefile | tr -d '[:space:]')
+            suf=$(awk -v p="$pv" '$1=="LINUX_VERSION-"p {gsub(/ /,"",$3); print $3; exit}' "target/linux/generic/kernel-$pv" 2>/dev/null || true)
+            KVER="${pv}${suf}"
+          fi
+          [ -n "$KVER" ] || { echo "::error::无法确定内核版本，拒绝发布（否则 apk 目录没法按 ABI 归类）"; exit 1; }
+          echo ">>> 本次内核版本：$KVER（目录 ponwrt-k$KVER）"
           files=(output/*.apk)
           if [ ${#files[@]} -eq 0 ]; then
             echo "::warning::本次没有 apk，跳过索引生成"
@@ -436,42 +496,97 @@ jobs:
           fi
           echo ">>> host apk: $APKBIN"
           "$APKBIN" --version || true
-          rm -f packages.adb index.err
-          # 索引工具是 apk mkndx（OpenWrt 自己的 package/Makefile 也是用它）。
-          # apk index 是 v2 索引生成器（输出 APKINDEX.tar.gz），遇到 v3 ADB 包直接报
-          #   ERROR: output/xxx.apk: file format not supported (in this applet)
-          # —— legacy run 44763931465 实测，于是 packages.adb 从未生成、repo 分支只留 README。
+
+          # 按能力分索引：规则见 configs/pon-feature-packages.txt（能力|通配），
+          # 未命中任何能力的包一律进 common。这样 HG5382A 只看 common，看不到 USB 包。
+          FEAT_FILE="configs/pon-feature-packages.txt"
+          feature_of() {
+            local b feat pats p
+            b=$(basename "$1")
+            if [ -f "$FEAT_FILE" ]; then
+              while IFS='|' read -r feat pats; do
+                case "$feat" in ''|'#'*) continue ;; esac
+                for p in $pats; do
+                  case "$b" in $p) echo "$feat"; return ;; esac
+                done
+              done < "$FEAT_FILE"
+            fi
+            echo common
+          }
+          rm -rf /tmp/stage && mkdir -p /tmp/stage
+          for f in "${files[@]}"; do
+            feat=$(feature_of "$f")
+            mkdir -p "/tmp/stage/$feat"
+            cp -f "$f" "/tmp/stage/$feat"/
+          done
+          echo ">>> 能力分组：$(for d in /tmp/stage/*/; do echo -n "$(basename "$d")=$(ls -1 "$d"*.apk 2>/dev/null | wc -l) "; done)"
+
           SIGN_ARG=""
           if [ -f "$PWD/private-key.pem" ]; then SIGN_ARG="--sign $PWD/private-key.pem"; fi
-          if ! "$APKBIN" mkndx --root "$PWD" --keys-dir "$PWD" --allow-untrusted $SIGN_ARG \
-                 --output packages.adb "${files[@]}" 2>index.err; then
-            cat index.err || true
-            echo "::warning::apk mkndx 生成索引失败，跳过在线源发布"
-            exit 0
-          fi
-          ls -l packages.adb
-          echo ">>> packages.adb 生成成功（$(stat -c%s packages.adb) 字节，${#files[@]} 个 apk）"
+          rm -rf /tmp/idx && mkdir -p /tmp/idx
+          for d in /tmp/stage/*/; do
+            feat=$(basename "$d")
+            # mkndx 是 v3 ADB 索引生成器；apk index 是 v2（遇到 v3 包直接报 file format not supported）
+            if ! "$APKBIN" mkndx --root "$PWD" --keys-dir "$PWD" --allow-untrusted $SIGN_ARG \
+                   --output "/tmp/idx/$feat.adb" "$d"*.apk 2>"/tmp/idx/$feat.err"; then
+              cat "/tmp/idx/$feat.err" || true
+              echo "::error::$feat 索引生成失败"
+              exit 1
+            fi
+            ls -l "/tmp/idx/$feat.adb"
+          done
 
-          # 托管到 ufo1cn/ponwrt-apk-repo 的 repo 分支，保持固定 URL 目录结构
           REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
           rm -rf /tmp/apkrepo
           if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/apkrepo 2>/dev/null; then
             git clone --depth=1 "$REPO_URL" /tmp/apkrepo
             git -C /tmp/apkrepo checkout -b repo
           fi
-          DEST=/tmp/apkrepo/aarch64_cortex-a53/ponwrt
-          mkdir -p "$DEST"
-          cp -f output/*.apk "$DEST"/
-          cp -f packages.adb "$DEST"/
-          ( cd "$DEST" && sha256sum *.apk > SHA256SUMS )
+          for d in /tmp/stage/*/; do
+            feat=$(basename "$d")
+            DEST="/tmp/apkrepo/aarch64_cortex-a53/ponwrt-k${KVER}/$feat"
+            mkdir -p "$DEST"
+            cp -f "$d"*.apk "$DEST"/
+            cp -f "/tmp/idx/$feat.adb" "$DEST/packages.adb"
+            ( cd "$DEST" && sha256sum ./*.apk > SHA256SUMS )
+            echo ">>> 已放入 ponwrt-k${KVER}/$feat（$(ls -1 "$DEST"/*.apk | wc -l) 个 apk）"
+          done
           git -C /tmp/apkrepo add -A
           git -C /tmp/apkrepo -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
-            commit -m "repo: run=${{ github.run_number }} device=${{ inputs.device }} apk=${#files[@]}" || true
-          if ! git -C /tmp/apkrepo push origin repo; then
+            commit -m "repo: run=${{ github.run_number }} device=${{ inputs.device }} k=$KVER feat=$(ls -1 /tmp/stage | tr '\n' ',')" || true
+          pushed=0
+          for i in 1 2 3; do
+            if git -C /tmp/apkrepo push origin repo; then pushed=1; break; fi
+            echo ">>> 推送被拒，第 $i 次 rebase 重试"
+            git -C /tmp/apkrepo fetch origin repo && git -C /tmp/apkrepo rebase origin/repo || true
+          done
+          if [ "$pushed" != "1" ]; then
             echo "::error::在线源推送失败（apk 已进 Release，但 raw 目录未更新）"
             exit 1
           fi
-          echo ">>> 在线源：https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt"
+          echo ">>> 在线源：https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt-k${KVER}/common"
+
+
+      - name: Check kmod ABI against firmware baseline
+        if: always()
+        run: |
+          set -uo pipefail
+          fw=$(grep '^firmware_kernel=' .ci-source-commit 2>/dev/null | cut -d= -f2 || true)
+          got=$(cat build_dir/target-*/linux-*/include/config/kernel.release 2>/dev/null | head -n1 || true)
+          echo ">>> 固件内核=${fw:-未知} 本树内核=${got:-未知}"
+          if [ -z "$fw" ] || [ "$fw" = "none" ]; then
+            echo "::warning::拿不到固件基线内核版本（apk-repo 还没有 meta/firmware.json），本次只记录不拦截"
+            exit 0
+          fi
+          if [ -z "$got" ]; then
+            echo "::warning::本 run 没编内核树（with_kernel=false），只记录基线 $fw"
+            exit 0
+          fi
+          if [ "$fw" != "$got" ]; then
+            echo "::error::内核版本与固件不一致：固件=$fw 本树=$got；这些 kmod 装到固件上会 ABI 不匹配"
+            exit 1
+          fi
+          echo ">>> ABI 核对通过：$fw"
 
       - name: Upload packages artifact
         if: always()
