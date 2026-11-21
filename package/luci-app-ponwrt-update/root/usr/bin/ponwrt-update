@@ -50,6 +50,20 @@ mode() {
 	esac
 }
 
+# 判断索引里的固件是否比本机新。三条入口工作流（fw-usb-wifi / fw-usb / fw-plain）
+# 的 run 编号互不相干（各自从 1 开始），manual 又是另一套编号，直接比 run 会误判，
+# 所以优先比构建时间 built_at（ISO8601 UTC 定长，可直接按字符串比），没有才退回比 run。
+is_newer() { # $1=远端 built_at  $2=本机 built_at  $3=远端 run  $4=本机 run
+	bu=${1:-}
+	lu=${2:-}
+	if [ -n "$bu" ] && [ -n "$lu" ]; then
+		[ "$bu" \> "$lu" ] && return 0
+		[ "$bu" = "$lu" ] && return 1
+		[ "$bu" \< "$lu" ] && return 1
+	fi
+	[ "${3:-0}" -gt "${4:-0}" ] 2>/dev/null
+}
+
 proxy_url() {
 	[ "$(mode)" = proxy ] || return 0
 	p_url=$(uget proxy)
@@ -180,11 +194,12 @@ rpc_check() {
 	fi
 	r_tag=$(jsonfilter -i "$tmp" -e '@.tag' 2>/dev/null)
 	r_run=$(jsonfilter -i "$tmp" -e '@.run' 2>/dev/null)
+	r_built=$(jsonfilter -i "$tmp" -e '@.built_at' 2>/dev/null)
 	r_name=$(jsonfilter -i "$tmp" -e '@.sysupgrade.name' 2>/dev/null)
 	r_sha=$(jsonfilter -i "$tmp" -e '@.sysupgrade.sha256' 2>/dev/null)
 	r_url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
 	rm -f "$tmp"
-	if [ -z "${r_run:-}" ]; then
+	if [ -z "${r_run:-}${r_tag:-}" ]; then
 		json_add_boolean ok 0
 		json_add_string error "索引内容无法解析（tag=${r_tag:-空}）"
 		json_add_string index_url "$iurl"
@@ -192,11 +207,12 @@ rpc_check() {
 		return 0
 	fi
 	up=0
-	[ "$r_run" -gt "${cur:-0}" ] 2>/dev/null && up=1
+	is_newer "$r_built" "$(vget built_at)" "$r_run" "$cur" && up=1
 	json_add_boolean ok 1
 	json_add_string tag "$r_tag"
 	json_add_string local_run "${cur:-0}"
-	json_add_string remote_run "$r_run"
+	json_add_string remote_run "${r_run:-0}"
+	json_add_string remote_built_at "$r_built"
 	json_add_string name "$r_name"
 	json_add_string url "$r_url"
 	json_add_string sha256 "$r_sha"
@@ -326,12 +342,13 @@ cli_check() {
 	fi
 	r_tag=$(jsonfilter -i "$tmp" -e '@.tag' 2>/dev/null)
 	r_run=$(jsonfilter -i "$tmp" -e '@.run' 2>/dev/null)
+	r_built=$(jsonfilter -i "$tmp" -e '@.built_at' 2>/dev/null)
 	r_name=$(jsonfilter -i "$tmp" -e '@.sysupgrade.name' 2>/dev/null)
 	r_sha=$(jsonfilter -i "$tmp" -e '@.sysupgrade.sha256' 2>/dev/null)
 	r_url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
 	rm -f "$tmp"
-	[ -n "${r_run:-}" ] || { echo "索引内容无法解析（tag=${r_tag:-空}）"; exit 3; }
-	if [ "$r_run" -gt "${cur:-0}" ] 2>/dev/null; then
+	[ -n "${r_run:-}${r_tag:-}" ] || { echo "索引内容无法解析（tag=${r_tag:-空}）"; exit 3; }
+	if is_newer "$r_built" "$(vget built_at)" "$r_run" "$cur"; then
 		echo
 		echo "发现新固件：$r_tag（run $r_run，本地 run ${cur:-0}）"
 		echo "  镜像：$r_name"
