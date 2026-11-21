@@ -159,6 +159,13 @@ jobs:
           chmod 600 private-key.pem
           openssl ec -in private-key.pem -pubout -out public-key.pem
           sha256sum public-key.pem
+          # 全链路只用同一把既有密钥：指纹对不上就立刻失败，避免"包签出来了但设备不认"
+          got=$(sha256sum public-key.pem | cut -d' ' -f1)
+          if [ "$got" != "d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed" ]; then
+            echo "::error::APK_SIGNING_PRIVATE_KEY 派生公钥指纹 $got 与既有密钥不一致"
+            exit 1
+          fi
+          echo ">>> 公钥指纹与既有密钥一致：$got"
 
       - name: Restore build tree cache (真增量的关键)
         if: inputs.reuse_build_tree && inputs.cache_mode != '完全重建'
