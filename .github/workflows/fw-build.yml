@@ -388,6 +388,16 @@ jobs:
                 fail=1
               fi
             done
+            # USB 无线网卡（rtw88 USB 栈）必须真的落地，否则清单里的 kmod-rtw88-* 就是被 kconfig 静默丢掉的
+            for m in rtw88_usb.ko rtw88_8822cu.ko rtw88_8821cu.ko; do
+              if find "$root" -name "$m*" 2>/dev/null | grep -q .; then
+                echo ">>> bake_usb 核对: $m 已在镜像里"
+              else
+                echo "::error::bake_usb=true，但 rootfs 里没有 $m（rtw88 USB 无线网卡符号被静默丢弃）"
+                fail=1
+              fi
+            done
+            echo ">>> rtw88 模块实到：$(find "$root" -name 'rtw88*.ko*' -printf '%f ' 2>/dev/null || true)"
           fi
           if has_cap usb; then
             if [ -z "$usb_found" ]; then
