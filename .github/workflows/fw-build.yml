@@ -381,7 +381,14 @@ jobs:
           echo ">>> rootfs: $root"
           fail=0
 
-          wifi_found=$(find "$root" -name 'mt7915e.ko*' -o -name 'mt7916*' 2>/dev/null | head -n5 || true)
+          # 只统计真正的无线驱动/固件：/lib/modules 下的 mt7915e/mt7916 kmod 和
+          # /lib/firmware 下的 mt7916 固件。base-files 里的 mt7916-* 平台脚本与
+          # sku 表是无条件存在的，不能作为"带了无线"的证据（曾经因此假失败）。
+          wifi_found=$(
+            { find "$root/lib/modules" -name 'mt7915e.ko*' -o -name 'mt7916*.ko*' 2>/dev/null
+              find "$root/lib/firmware" -name 'mt7916*' 2>/dev/null
+            } | head -n5 || true
+          )
           if has_cap wifi; then
             if [ -z "$wifi_found" ]; then
               echo "::error::机型能力含 wifi，但 rootfs 里找不到 mt7915e/mt7916 驱动（内置无线没进镜像）"
@@ -420,9 +427,13 @@ jobs:
             done
             echo ">>> rtw88 模块实到：$(find "$root" -name 'rtw88*.ko*' -printf '%f ' 2>/dev/null || true)"
           fi
-          if has_cap usb; then
+          if has_cap usb && [ "${{ inputs.bake_usb }}" != "true" ]; then
+            # 不烘焙：usb 片段所有符号都是 =m，驱动作为 apk 进仓库，设备上按需装。
+            # 镜像里有没有 USB 栈取决于机型 profile 的 DEVICE_PACKAGES，这里不强制要求。
+            echo ">>> usb 能力按 apk 提供（bake_usb=false），镜像内不强制要求 USB 栈；实到：$(echo "${usb_found:-（无）}" | tr '\n' ' ')"
+          elif has_cap usb; then
             if [ -z "$usb_found" ]; then
-              echo "::error::机型能力含 usb，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
+              echo "::error::机型能力含 usb 且 bake_usb=true，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
               fail=1
             else
               echo ">>> usb 能力核对通过：$(echo "$usb_found" | head -n1)"
