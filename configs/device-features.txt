@@ -1,24 +1,21 @@
-# 机型 -> apk 仓库能力索引
+# 机型 -> 能力表（同时驱动两件事：镜像里编什么、设备上挂哪些 apk 源）
 # ------------------------------------------------------------------------------
 # 格式：<board_name>|<能力1> <能力2> ...
-# 能力名对应 apk 仓库目录：aarch64_cortex-a53/ponwrt-k<内核版本>/<能力>/
-#   common —— 所有机型都挂（用户态 + 与硬件无关的 kmod），不需要写在这里
+# 能力名对应两个地方：
+#   1) 固件配置片段：configs/features/<能力>.config（本工作流编译时应用到 .config）
+#   2) apk 仓库目录：aarch64_cortex-a53/ponwrt-k<内核版本>/<能力>/
+#   没有的能力不会挂对应源；除 wifi 外没有的能力也不会编进镜像。
 #
 # 规则：
-#   1) 没列出的机型只挂 common（安全默认，不会误装硬件相关的包）；
-#   2) 新增机型（例如「有 USB 无 WiFi」）只需加一行 `xxx|usb`，不用改任何工作流；
-#   3) 能力判断是编译期写进镜像的，改了这张表要重编固件才生效（设备侧也可手动改
+#   1) 没列出的机型只挂 common 源、镜像里只有公共部件（安全默认）；
+#   2) 新增机型只需加一行（例如「有 USB 无 WiFi」写 `xxx|usb`），工作流不用改；
+#   3) 能力是编译期写进镜像的，改了这张表要重编固件才生效（设备侧也可手动改
 #      /etc/apk/repositories.d/90-ponwrt-apk-repo.list 临时加源）。
-#
-# 现状依据（源码级）：
-#   - configs/release.config 把 kmod-mt7915e / kmod-mt7916-firmware 设成 =y（无线
-#     驱动内置进镜像，不需要在线装），所以 HG5585F-CT / HG5382A 都不需要 wifi 能力；
-#   - configs/an7581.config 里 kmod-usb-* 是 =m（可在线装），USB 栈只给带 USB 的机型挂；
-#   - HG5382A 镜像不含 USB 驱动栈，因此不给它挂 usb 源；
-#   - Nokia XG-040G-MD（nokia_xg-040g-md-ubi）有 USB、无内置无线：工作流会按机型
-#     关掉 release.config 的 mt7915e/mt7916，USB 栈与 USB 无线网卡驱动都走 usb 能力。
+#   4) devices=both 时按两台机型的并集生效（要严格隔离请单机型运行）：
+#      - apk 源会同时挂 usb/wifi 两个目录；
+#      - =y 的包（如 kmod-mt7915e）会进「每一台」机型的镜像，无法按机型分离。
 # ------------------------------------------------------------------------------
 
-fiberhome_hg5585f-ct|usb
+fiberhome_hg5585f-ct|usb wifi
 fiberhome_hg5382a|
 nokia_xg-040g-md-ubi|usb
