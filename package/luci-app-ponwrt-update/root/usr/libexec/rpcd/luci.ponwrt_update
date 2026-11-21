@@ -1,0 +1,14 @@
+#!/bin/sh
+# rpcd 后端：LuCI 固件更新页的所有动作都走这里，最终执行 /usr/bin/ponwrt-update rpc
+case "$1" in
+list)
+	cat <<'EOF'
+{"status":{},"detect":{},"check":{},"set":{"mode":"str","proxy":"str","index_base":"str"},"download":{"url":"str","sha256":"str"},"apply":{"wipe":"bool"}}
+EOF
+	;;
+call)
+	input=""
+	read -r input
+	/usr/bin/ponwrt-update rpc "$2" "$input"
+	;;
+esac
