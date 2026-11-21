@@ -12,10 +12,13 @@
 #
 # 现状依据（源码级）：
 #   - configs/release.config 把 kmod-mt7915e / kmod-mt7916-firmware 设成 =y（无线
-#     驱动内置进镜像，不需要在线装），所以当前两台机型都不需要 wifi 能力索引；
-#   - configs/an7581.config 里 kmod-usb-* 是 =m（可在线装），USB 栈只给 HG5585F-CT 挂；
-#   - HG5382A 镜像不含 USB 驱动栈，因此不给它挂 usb 源。
+#     驱动内置进镜像，不需要在线装），所以 HG5585F-CT / HG5382A 都不需要 wifi 能力；
+#   - configs/an7581.config 里 kmod-usb-* 是 =m（可在线装），USB 栈只给带 USB 的机型挂；
+#   - HG5382A 镜像不含 USB 驱动栈，因此不给它挂 usb 源；
+#   - Nokia XG-040G-MD（nokia_xg-040g-md-ubi）有 USB、无内置无线：工作流会按机型
+#     关掉 release.config 的 mt7915e/mt7916，USB 栈与 USB 无线网卡驱动都走 usb 能力。
 # ------------------------------------------------------------------------------
 
 fiberhome_hg5585f-ct|usb
 fiberhome_hg5382a|
+nokia_xg-040g-md-ubi|usb
