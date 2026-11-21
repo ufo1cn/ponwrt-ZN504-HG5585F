@@ -1,0 +1,13 @@
+# 包 -> 能力索引的归类规则
+# ------------------------------------------------------------------------------
+# 格式：<能力>|<包名通配，空格分隔>
+# 能力名必须与 apk 仓库目录 aarch64_cortex-a53/ponwrt-k<内核版本>/<能力>/ 一致；
+# common 是兜底：没有命中任何规则的包一律进 common（不会因为规则漏写而丢包）。
+#
+# 新增能力（例如 bt）时：这里加一行规则 + configs/device-features.txt 给对应机型加
+# 该能力，就能生效，工作流不用改。
+# ------------------------------------------------------------------------------
+
+usb|kmod-usb-* kmod-*-usb-* usbip-* usbutils-* uvc-* libusb*-* usbmode-*
+wifi|kmod-rtw88-* kmod-rtl8* kmod-mt76* kmod-ath* kmod-iwlwifi* wireless-regdb wpa-supplicant hostapd iw
+bt|kmod-bt* kmod-bluetooth* bluez-* luci-app-blue*
