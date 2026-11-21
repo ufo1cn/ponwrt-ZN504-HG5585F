@@ -1,0 +1,50 @@
+name: Build PonWrt firmware (manual)
+
+# 兼容入口：保留原来的 devices 选择方式，实际编译都走 fw-build.yml（reusable）。
+# 新机型/新类别请优先用按类别拆开的入口：
+#   fw-usb-wifi.yml（USB + 内置无线）
+#   fw-usb.yml     （USB、无内置无线）
+#   fw-plain.yml   （无 USB、无内置无线）
+# 之所以按类别拆：=y 的包会进"每一个"镜像，混在一台多机上编无法按机型隔离软件集合。
+
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: '编译机型（both = HG5585F-CT + HG5382A 混编，仅作兼容）'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - 'both'
+          - 'hg5585f-ct'
+          - 'hg5382a'
+          # Nokia XG-040G-MD：有 USB、无内置无线，board 名 nokia_xg-040g-md-ubi
+          - 'xg040md'
+      upload_release:
+        description: '上传 GitHub Release'
+        required: false
+        default: true
+        type: boolean
+      cache_mode:
+        description: '编译缓存模式（使用缓存 / 重新编译 / 不使用缓存）'
+        required: false
+        default: '使用缓存'
+        type: choice
+        options:
+          - '使用缓存'
+          - '重新编译'
+          - '不使用缓存'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/fw-build.yml
+    with:
+      label: "${{ inputs.devices }}"
+      device_list: "${{ inputs.devices == 'hg5585f-ct' && 'fiberhome_hg5585f-ct' || inputs.devices == 'hg5382a' && 'fiberhome_hg5382a' || inputs.devices == 'xg040md' && 'nokia_xg-040g-md-ubi' || 'fiberhome_hg5585f-ct fiberhome_hg5382a' }}"
+      upload_release: ${{ inputs.upload_release }}
+      cache_mode: ${{ inputs.cache_mode }}
+    secrets: inherit
