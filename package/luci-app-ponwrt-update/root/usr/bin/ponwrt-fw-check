@@ -1,0 +1,5 @@
+#!/bin/sh
+# PonWrt 固件更新检查（命令行薄壳，逻辑全在 /usr/bin/ponwrt-update）
+# 索引：<index_base>/<device>.json，默认
+#   https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/fw
+exec /usr/bin/ponwrt-update check
