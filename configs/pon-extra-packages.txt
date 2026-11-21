@@ -3,10 +3,8 @@
 # 路径不存在时工作流会按目录名在 package/feeds 下回退查找，找不到才判定缺失。
 # mihomo-meta / mihomo-alpha 由 inputs.mihomo 门控（互 PROVIDES/CONFLICTS，只能选一个）。
 
-# ---- iptv（源码 feeds/iptv，yveming/openwrt-iptv）----
-# kmod-iptv 不在这里编：改由固件流程编译并随 kmods-* 预发布交付（见 configs/features/kmod-repo.config）
-package/feeds/iptv/luci-app-iptv|luci-app-iptv|required
-package/feeds/iptv/luci-i18n-iptv-zh-cn|luci-i18n-iptv-zh-cn|optional
+# ---- iptv（kmod-iptv + luci-app-iptv + i18n）已整体移交固件流程 fw-build.yml，
+#      作为独立 apk 随 kmods-<label>-r<run> 预发布交付，本流程不再涉及 iptv。
 
 # ---- 组播代理（kmod-iptv 的配套数据面，非必须但推荐）----
 package/feeds/packages/omcproxy|omcproxy|optional
