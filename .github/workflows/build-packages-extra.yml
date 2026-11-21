@@ -26,6 +26,9 @@ name: Build Packages (extra C-class | iptv/nikki/passwall2/homeproxy) manual
 #   4) 只选 =m（不 =y），产物是 apk，不进固件。
 #   5) 发布口径：本文件只出 artifact 与本仓 prerelease，**不 push apk-repo**；
 #      进软件仓库（aarch64_cortex-a53/ponwrt-k<kver>/<能力>/）统一由 pkg-publish.yml 做。
+# 5) kmod 归属：本流程只编用户态包；kmod 一律由固件构建流程 fw-build.yml 在同一次
+#    构建里编成 apk，随固件 artifact 与 kmods-<label>-r<run> 预发布交付，
+#    再由 pkg-publish.yml 统一搬进软件仓库。
 # ==============================================================================
 
 on:
@@ -291,18 +294,15 @@ jobs:
           make -j"$(nproc)" tools/compile
           make -j"$(nproc)" toolchain/compile
 
-      - name: Build kernel tree (kmod ABI 来源)
+      - name: Build kernel tree (用户态包所需的内核头与 staging)
         if: inputs.with_kernel
         run: |
           set -euo pipefail
           make -j"$(nproc)" target/linux/compile
           make -j"$(nproc)" target/linux/install || true
 
-      - name: Build kernel modules selected by config
-        run: |
-          set -euo pipefail
-          make -j"$(nproc)" package/kernel/linux/compile
-
+      # kmod 不在这里编：统一由固件构建流程（fw-build.yml）编译并作为 apk 发布，
+      # 保证 build/src/ABI 与固件同一次构建一致（清单见 configs/features/kmod-repo.config）
       - name: Build packages (B/C 两组清单, no silent drop)
         run: |
           set -euo pipefail
