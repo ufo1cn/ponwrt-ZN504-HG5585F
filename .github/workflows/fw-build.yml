@@ -14,7 +14,13 @@ name: PonWrt firmware build (reusable)
 #       不再执行 defconfig）；
 #   4) 产物：上游 find 只匹配 zn504 / hg5585f-ct / hg5585f-cu，HG5382A 会被名字
 #      过滤静默丢弃；这里加上 *hg5382a* 并对目标机型做存在性硬校验；
-#   5) 未改动：Feed 更新、customize.sh、包源码下载、编译命令、ccache 存取、
+#   5) kmod 归属：所有 kmod 都在这里编——能力片段里 =m 的驱动，bake_usb=true 时
+#      改写成 =y 烘进镜像，否则只出 apk；configs/features/kmod-repo.config 里的
+#      kmod 保持 =m（只出 apk 不进镜像）。iptv 的 kmod 与其上层 luci-app-iptv /
+#      i18n 成对在此编译（树外 feed，feeds update 前注入），保证版本与 ABI 一致。
+#      产物收集到 kmods/ 并发布 kmods-<label>-r<run> 预发布，由 pkg-publish.yml
+#      搬进软件仓库；三条 build-packages-* 流程只编用户态包。
+#   6) 未改动：customize.sh、包源码下载、编译命令、ccache 存取、
 #      产物 sha256、Artifact 上传、Release 发布流程。
 # ==============================================================================
 
@@ -407,21 +413,36 @@ jobs:
           [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: Collect kmod apks for the package repo
-        if: always()
+      - name: Collect repo apks (kmod + iptv 上层)
+        if: success()
         run: |
           set -uo pipefail
           rm -rf kmods && mkdir -p kmods
-          # =y（烘进镜像）与 =m（仅编包）都会生成 apk，这里统一收集：
           # kmod 一律由本工作流编译（与固件同一次构建、同一棵树），
           # 三条包工作流不再编 kmod，避免 ABI 漂移与重复构建。
-          find bin/packages bin/targets -type f -name 'kmod-*.apk' -exec cp -f {} kmods/ \; 2>/dev/null || true
+          # iptv 的 kmod 与其上层（luci-app / i18n）成对收集，版本天然一致。
+          find bin/packages bin/targets -type f \
+            \( -name 'kmod-*.apk' -o -name 'luci-app-iptv-*.apk' -o -name 'luci-i18n-iptv-*.apk' \) \
+            -exec cp -f {} kmods/ \; 2>/dev/null || true
           n=$(ls -1 kmods/*.apk 2>/dev/null | wc -l)
-          echo ">>> 收集到 kmod apk：$n 个"
+          echo ">>> 收集到 apk：$n 个"
           ls -1 kmods 2>/dev/null | head -n 40 || true
-          if [ "$n" -eq 0 ]; then
-            echo "::warning::本次没有收集到 kmod apk（全部 =y 且未生成独立包时会这样）"
+
+          # 期望清单硬校验：少一个就失败，不允许静默少包
+          miss=0
+          for want in kmod-fs-nfs kmod-fs-nfs-common kmod-fs-nfs-v4 kmod-fs-nfsd \
+                      kmod-inet-diag kmod-netlink-diag kmod-iptv \
+                      luci-app-iptv luci-i18n-iptv-zh-cn; do
+            if ! ls -1 kmods 2>/dev/null | grep -q "^${want}-[0-9]"; then
+              echo "::error::缺少 ${want} 的 apk（CONFIG_PACKAGE_${want}=m 未产出）"
+              miss=1
+            fi
+          done
+          if [ "$miss" -ne 0 ]; then
+            echo "::error::仓库 apk 不齐，后面发布不可继续"
+            exit 1
           fi
+          echo ">>> 期望的 9 个 apk 全部就位"
 
       - name: Export apk public key for the package repo
         if: always()
