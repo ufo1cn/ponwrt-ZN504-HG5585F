@@ -187,12 +187,57 @@ jobs:
 
           # 强制 base-files 重编：build_dir 缓存会保留上一次的 signing key，
           # 不清掉的话镜像里 /etc/apk/keys/public-key.pem 还是旧 key。
-          # 同时在 repositories.d 里留一条（默认注释，避免无外网时 apk update 卡超时）
+          case "${{ inputs.devices }}" in
+            hg5585f-ct) TARGET_DEVS="fiberhome_hg5585f-ct" ;;
+            hg5382a)    TARGET_DEVS="fiberhome_hg5382a" ;;
+            *)          TARGET_DEVS="fiberhome_hg5585f-ct fiberhome_hg5382a"
+                        echo "::warning::devices=both 时 repositories.d 按两台机型能力的并集写（镜像内容仍按各自 config，不受影响）；要严格隔离请单机型运行" ;;
+          esac
+          # 源地址按【本次内核版本 + 能力】分目录：apk 的兼容键是 arch+libc+vermagic，
+          # 与机型无关，所以主目录按 kver 分、能力再分子目录（common / usb / wifi / bt…）。
+          # 机型 -> 能力 的映射见 configs/device-features.txt；没写的机型只挂 common。
+          pv=$(awk -F':=' '/^KERNEL_PATCHVER/ {print $2; exit}' target/linux/airoha/Makefile | tr -d '[:space:]')
+          suf=$(awk -v p="$pv" '$1=="LINUX_VERSION-"p {gsub(/ /,"",$3); print $3; exit}' "target/linux/generic/kernel-$pv")
+          KVER="${pv}${suf}"
+          [ -n "$KVER" ] || { echo "::error::算不出内核版本（KERNEL_PATCHVER=$pv）"; exit 1; }
+          echo ">>> 预计算内核版本 KVER=$KVER"
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          RAW="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt-k${KVER}"
+          features_of() {
+            local dev line block out
+            dev="$1"; out=""
+            line=$(grep -E "^[[:space:]]*${dev}[[:space:]]*\|" configs/device-features.txt 2>/dev/null | head -n1 || true)
+            if [ -n "$line" ]; then printf '%s' "${line#*|}"; return 0; fi
+            # 兜底：从机型 profile 的 DEVICE_PACKAGES 推能力
+            block=$(awk -v d="$dev" 'index($0,"define Device/" d)==1 {f=1;next} f&&/^endef/{exit} f' target/linux/airoha/image/*.mk 2>/dev/null || true)
+            if echo "$block" | grep -qiE 'kmod-usb'; then out="$out usb"; fi
+            if echo "$block" | grep -qiE 'kmod-(rtw88|rtl8|mt76|ath9k|ath10|ath11|iwlwifi)'; then out="$out wifi"; fi
+            if echo "$block" | grep -qiE 'kmod-(btusb|bluetooth)|bluez'; then out="$out bt"; fi
+            printf '%s' "$out"
+          }
+          caps=""
+          for dev in $TARGET_DEVS; do
+            for c in $(features_of "$dev"); do
+              case " $caps " in *" $c "*) ;; *) caps="$caps $c" ;; esac
+            done
+          done
+          echo ">>> 目标机型 $TARGET_DEVS 能力：${caps:-（仅 common）}"
           mkdir -p package/base-files/files/etc/apk/repositories.d
-          printf '%s\n' \
-            '# PonWrt 自建 apk 源（与固件同一把私钥签名）；该地址不可达时把下一行注释掉并把包拷进设备离线安装' \
-            'https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt' \
-            > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
+          lines=()
+          if curl -fsI --max-time 25 "$RAW/common/packages.adb" >/dev/null 2>&1; then
+            lines+=("# PonWrt 在线源（内核 $KVER / 通用包；与固件同一把私钥签名）" "$RAW/common/packages.adb")
+            for c in $caps; do
+              if curl -fsI --max-time 25 "$RAW/$c/packages.adb" >/dev/null 2>&1; then
+                lines+=("# PonWrt 在线源（内核 $KVER / 能力 $c）" "$RAW/$c/packages.adb")
+              else
+                echo "::warning::仓库还没有 ponwrt-k${KVER}/$c 索引，本次跳过该能力源"
+              fi
+            done
+          else
+            echo "::warning::仓库还没有 ponwrt-k${KVER}/common 索引，回退旧目录（用户态包与内核无关，可继续用）"
+            lines+=("# PonWrt 在线源（旧目录，未按内核版本分；kmod 不要从这里装）" "https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt/packages.adb")
+          fi
+          printf '%s\n' "${lines[@]}" > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
           cat package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
 
           rm -rf build_dir/target-*/base-files* || true
@@ -206,6 +251,70 @@ jobs:
         run: |
           [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
           make -j"$(nproc)" || make -j1 V=s
+
+      - name: Record build provenance (源码 commit + 内核版本)
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          kver=$(cat build_dir/target-*/linux-*/include/config/kernel.release 2>/dev/null | head -n1 || true)
+          ko=$(find build_dir/target-*/linux-*/ -name '*.ko' -print 2>/dev/null | head -n1 || true)
+          ver=""
+          [ -n "$ko" ] && ver=$(modinfo -F vermagic "$ko" 2>/dev/null | head -n1 || true)
+          pub=$(sha256sum public-key.pem 2>/dev/null | awk '{print $1}' || true)
+          {
+            echo "device=${{ inputs.devices }}"
+            echo "ponwrt_commit=$(git rev-parse HEAD)"
+            echo "kernel_version=${kver:-unknown}"
+            echo "kmod_vermagic=${ver:-unknown}"
+            echo "config_an7581_sha256=$(sha256sum configs/an7581.config | awk '{print $1}')"
+            echo "config_release_sha256=$(sha256sum configs/release.config | awk '{print $1}')"
+            echo "config_6_18_sha256=$(sha256sum target/linux/airoha/an7581/config-6.18 | awk '{print $1}')"
+            echo "apk_pubkey_sha256=${pub:-none}"
+            echo "apk_repo_dir=ponwrt-k${KVER}"
+            echo "run=${{ github.run_number }}"
+            echo "workflow=${{ github.workflow }}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } | tee output/build-info.txt
+
+      - name: Publish provenance baseline to apk repo
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::未配置 APK_REPO_TOKEN，跳过基线发布（本次仍随 artifact/Release 记录）"
+            exit 0
+          fi
+          [ -f output/build-info.txt ] || { echo "::warning::没有 build-info.txt，跳过"; exit 0; }
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
+          rm -rf /tmp/apkmeta
+          if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/apkmeta 2>/dev/null; then
+            echo "::warning::apk-repo 的 repo 分支还取不到，跳过基线发布"
+            exit 0
+          fi
+          mkdir -p /tmp/apkmeta/meta
+          cp -f output/build-info.txt "/tmp/apkmeta/meta/firmware-k${KVER}-$(git rev-parse --short HEAD).txt"
+          cp -f output/build-info.txt /tmp/apkmeta/meta/latest.txt
+          python3 - "output/build-info.txt" "$KVER" "${{ inputs.devices }}" > /tmp/apkmeta/meta/firmware.json <<'PY'
+          import json,sys
+          src,kver,dev=sys.argv[1],sys.argv[2],sys.argv[3]
+          d={}
+          for line in open(src,encoding="utf-8"):
+              if "=" in line:
+                  k,v=line.strip().split("=",1); d[k]=v
+          d["kernel_version"]=kver; d["devices"]=dev
+          print(json.dumps(d,ensure_ascii=False,indent=2))
+          PY
+          cat /tmp/apkmeta/meta/firmware.json
+          git -C /tmp/apkmeta add -A
+          git -C /tmp/apkmeta -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
+            commit -m "meta: firmware k=$KVER run=${{ github.run_number }}" || true
+          for i in 1 2 3; do
+            if git -C /tmp/apkmeta push origin repo; then echo ">>> 基线已发布到 apk-repo/meta"; exit 0; fi
+            git -C /tmp/apkmeta fetch origin repo && git -C /tmp/apkmeta rebase origin/repo || true
+          done
+          echo "::warning::基线推送失败（不影响固件产物，下一轮巡检会补）"
+
 
       - name: Save compiler ccache
         if: always() && inputs.cache_mode != '不使用缓存'
@@ -305,4 +414,5 @@ jobs:
             - 内核能力来源：`target/linux/airoha/an7581/config-6.18` 的基础设施符号
             - 工作流基线：上游 `build-zn504.yml`（仅改触发方式、机型锁定与产物收集）
             - 内核与 kmod 同源树编译，ABI 与 `build-packages-incremental.yml` 的 apk 一致
+            - 源码 commit 与内核版本记录在附件 `build-info.txt`（`ponwrt_commit` / `kernel_version` / `kmod_vermagic`）
           files: output/*
