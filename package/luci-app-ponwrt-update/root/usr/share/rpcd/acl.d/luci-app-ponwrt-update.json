@@ -1,0 +1,16 @@
+{
+	"luci-app-ponwrt-update": {
+		"description": "Grant access to PonWrt firmware update (check / download / apply / settings)",
+		"read": {
+			"ubus": {
+				"luci.ponwrt_update": [ "status", "detect", "check" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.ponwrt_update": [ "set", "download", "apply" ]
+			},
+			"uci": [ "ponwrt_update" ]
+		}
+	}
+}
