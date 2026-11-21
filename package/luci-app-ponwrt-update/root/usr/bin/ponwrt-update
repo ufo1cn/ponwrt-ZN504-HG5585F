@@ -25,6 +25,24 @@ IDX_DEFAULT="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/
 vget() { sed -n "s/^$1=//p" "$VF" 2>/dev/null | head -n1; }
 uget() { uci -q get "ponwrt_update.settings.$1" 2>/dev/null || true; }
 
+# 索引是按单机型命名的（meta/fw/<device>.json）。manual 的 devices=both 会把两个
+# 机型一起写进版本戳的 device 字段，这种带空格的多值串不能当索引键，所以这里优先
+# 用单值，多值时退回内核对外的 board_name（DTS compatible，逗号换成下划线）。
+dev_name() {
+	d=$(vget device)
+	case "$d" in
+	'' | *' '*) ;;
+	*) printf '%s' "$d"; return 0 ;;
+	esac
+	b=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+	if [ -z "$b" ]; then
+		b=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
+	fi
+	b=$(printf '%s' "$b" | tr ',' '_' | tr -d ' ')
+	[ -n "$b" ] && printf '%s' "$b"
+	return 0
+}
+
 mode() {
 	case "$(uget mode)" in
 	direct | proxy | transparent) uget mode ;;
@@ -89,7 +107,7 @@ rpc_status() {
 	. "$JSHN"
 	json_init
 	json_add_boolean ok 1
-	json_add_string device "$(vget device)"
+	json_add_string device "$(dev_name)"
 	json_add_string feature_class "$(vget feature_class)"
 	json_add_string commit "$(vget commit_short)"
 	json_add_string built_at "$(vget built_at)"
@@ -134,7 +152,7 @@ rpc_detect() {
 }
 
 rpc_check() {
-	dev=$(vget device)
+	dev=$(dev_name)
 	cur=$(vget run)
 	. "$JSHN"
 	json_init
@@ -284,7 +302,7 @@ out_mode() {
 }
 
 cli_status() {
-	echo "设备：$(vget device)（能力 $(vget feature_class)）"
+	echo "设备：$(dev_name)（能力 $(vget feature_class)）"
 	echo "本地版本：commit $(vget commit_short)，run $(vget run)，构建于 $(vget built_at)"
 	echo "内核：$(uname -r 2>/dev/null)"
 	echo "出站方式：$(out_mode)"
@@ -295,7 +313,7 @@ cli_status() {
 
 cli_check() {
 	[ -f "$VF" ] || { echo "缺少 $VF：这不是 PonWrt 固件，或构建时没写入版本戳"; exit 1; }
-	dev=$(vget device)
+	dev=$(dev_name)
 	cur=$(vget run)
 	echo "本地：device=${dev:-?} run=${cur:-0} 能力=$(vget feature_class)"
 	echo "出站：$(out_mode)；索引：$(idx_base)"
@@ -327,7 +345,7 @@ cli_check() {
 }
 
 cli_download() {
-	dev=$(vget device)
+	dev=$(dev_name)
 	[ -n "$dev" ] || { echo "缺少 device 字段"; exit 1; }
 	tmp=$(mktemp) || exit 1
 	if ! fetch -fsSL --connect-timeout 10 --retry 2 "$(idx_base)/$dev.json" -o "$tmp"; then
