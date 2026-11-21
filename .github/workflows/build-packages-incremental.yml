@@ -15,6 +15,9 @@ name: Build Packages (same kernel tree, incremental) manual
 #    缺包、目录缺失、编译失败都会让 job 失败并在 summary 里列出。
 # 4) 发布口径：本文件只出 artifact 与本仓 prerelease，**不 push apk-repo**；
 #    进软件仓库（能力分组目录 + 签名索引）统一由 .github/workflows/pkg-publish.yml 做。
+# 5) kmod 归属：本流程只编用户态包；所有 kmod（usb/wifi/bt/uvc/fs/iptv 之外的内置驱动）
+#    由固件构建流程 fw-build.yml 在同一次构建里编成 apk，随固件 artifact 与
+#    `kmods-<label>-r<run>` 预发布一起交付，再统一由 pkg-publish.yml 进软件仓库。
 # ==============================================================================
 
 on:
@@ -277,7 +280,7 @@ jobs:
           make -j"$(nproc)" tools/compile
           make -j"$(nproc)" toolchain/compile
 
-      - name: Build kernel tree (kmod ABI 来源)
+      - name: Build kernel tree (用户态包所需的内核头与 staging)
         if: inputs.with_kernel
         run: |
           set -euo pipefail
@@ -285,11 +288,8 @@ jobs:
           make -j"$(nproc)" target/linux/compile
           make -j"$(nproc)" target/linux/install || true
 
-      - name: Build kernel modules selected by config
-        run: |
-          set -euo pipefail
-          make -j"$(nproc)" package/kernel/linux/compile
-
+      # kmod 不在这里编：统一由固件构建流程（fw-build.yml）编译并作为 apk 发布，
+      # 保证 build/src/ABI 与固件同一次构建一致（清单见 configs/features/kmod-repo.config）
       - name: Build pon-userspace packages (incremental, no silent drop)
         run: |
           set -euo pipefail
@@ -536,7 +536,7 @@ jobs:
             staging_dir/host
           key: ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-${{ github.run_id }}
 
-      - name: Check kmod ABI against firmware baseline
+      - name: Check source tree matches firmware baseline (informational)
         if: always()
         run: |
           set -uo pipefail
@@ -552,8 +552,8 @@ jobs:
             exit 0
           fi
           if [ "$fw" != "$got" ]; then
-            echo "::error::内核版本与固件不一致：固件=$fw 本树=$got；这些 kmod 装到固件上会 ABI 不匹配"
-            exit 1
+            # 本流程只编用户态包（kmod 由固件流程编），版本不一致只提示，不拦
+            echo "::warning::源码树内核 $got 与固件基线 $fw 不一致；用户态包不受影响，kmod 请用固件流程的产物"
           fi
           echo ">>> ABI 核对通过：$fw"
 
