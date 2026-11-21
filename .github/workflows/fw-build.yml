@@ -341,6 +341,60 @@ jobs:
           find build_dir/target-* -maxdepth 3 -name '*base-files*' -path '*stamp*' -exec rm -rf {} + 2>/dev/null || true
           echo ">>> base-files 构建状态已清除"
 
+      - name: Inject firmware version stamp and update checker
+        run: |
+          set -euo pipefail
+          mkdir -p files/etc files/usr/bin
+          cat > files/etc/ponwrt-version <<EOF
+          device=${{ inputs.device_list }}
+          feature_class=${{ inputs.label }}
+          commit=$(git rev-parse HEAD)
+          commit_short=$(git rev-parse --short HEAD)
+          run=${{ github.run_number }}
+          built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+          cat > files/usr/bin/ponwrt-fw-check <<'EOF'
+          #!/bin/sh
+          # PonWrt 固件更新检查（GitHub Releases 索引，纯 GitHub 方案，无需 ASU 服务端）
+          # 索引地址：https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/fw/<device>.json
+          IDX_BASE="${PONWRT_FW_INDEX:-https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/fw}"
+          VF=/etc/ponwrt-version
+          [ -f "$VF" ] || { echo "缺少 $VF，无法判断本地版本"; exit 1; }
+          dev=$(sed -n 's/^device=//p' "$VF" | head -n1)
+          cur=$(sed -n 's/^run=//p' "$VF" | head -n1)
+          echo "本地：device=$dev run=$cur feature_class=$(sed -n 's/^feature_class=//p' "$VF" | head -n1)"
+          [ -n "$dev" ] || { echo "本地版本文件里没有 device 字段"; exit 1; }
+          tmp=$(mktemp) || exit 1
+          if ! curl -fsSL --connect-timeout 10 --retry 2 "$IDX_BASE/$dev.json" -o "$tmp"; then
+            echo "拉取更新索引失败：$IDX_BASE/$dev.json（检查本机能否访问 raw.githubusercontent.com）"
+            rm -f "$tmp"; exit 2
+          fi
+          tag=$(jsonfilter -i "$tmp" -e '@.tag' 2>/dev/null)
+          newrun=$(jsonfilter -i "$tmp" -e '@.run' 2>/dev/null)
+          name=$(jsonfilter -i "$tmp" -e '@.sysupgrade.name' 2>/dev/null)
+          sha=$(jsonfilter -i "$tmp" -e '@.sysupgrade.sha256' 2>/dev/null)
+          url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
+          man=$(jsonfilter -i "$tmp" -e '@.manifest.url' 2>/dev/null)
+          rm -f "$tmp"
+          [ -n "$newrun" ] || { echo "索引内容无法解析（tag=$tag）"; exit 3; }
+          if [ "$newrun" -gt "${cur:-0}" ] 2>/dev/null; then
+            echo
+            echo "发现新固件：$tag（run $newrun，本地 run ${cur:-0}）"
+            echo "  镜像：$name"
+            echo "  下载：$url"
+            echo "  sha256：$sha"
+            [ -n "$man" ] && echo "  manifest：$man"
+            echo
+            echo "升级步骤：下载后用 sha256sum -c 校验，再 sysupgrade -k -v <itb>（保留配置）或 sysupgrade -n -v <itb>（不保留）"
+            exit 0
+          fi
+          echo "已是最新固件（索引 tag=$tag run=$newrun）"
+          EOF
+          chmod +x files/usr/bin/ponwrt-fw-check
+          echo ">>> 注入完成："
+          cat files/etc/ponwrt-version
+          sh -n files/usr/bin/ponwrt-fw-check && echo ">>> 更新检查脚本语法 OK"
+
       - name: Download package sources
         run: make download -j"$(nproc)"
 
@@ -603,3 +657,78 @@ jobs:
             - 内核与 kmod 同源树编译，ABI 与 `build-packages-incremental.yml` 的 apk 一致
             - 源码 commit 与内核版本记录在附件 `build-info.txt`（`ponwrt_commit` / `kernel_version` / `kmod_vermagic`）
           files: output/*
+
+      - name: Publish firmware update index to apk repo
+        if: inputs.upload_release
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::未配置 APK_REPO_TOKEN，跳过固件更新索引发布"
+            exit 0
+          fi
+          TAG="${{ steps.tag.outputs.release_tag }}"
+          [ -n "$TAG" ] || { echo "::warning::没有 tag，跳过索引发布"; exit 0; }
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
+          rm -rf /tmp/fwidx
+          if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/fwidx 2>/dev/null; then
+            echo "::warning::apk-repo 的 repo 分支取不到，跳过索引发布"
+            exit 0
+          fi
+          mkdir -p /tmp/fwidx/meta/fw
+          commit=$(git rev-parse HEAD)
+          kver=$(sed -n 's/^kernel_version=//p' output/build-info.txt 2>/dev/null | head -n1)
+          btime=$(sed -n 's/^built_at=//p' output/build-info.txt 2>/dev/null | head -n1)
+          python3 - "output" "$TAG" "$commit" "${kver:-unknown}" "${btime:-}" "/tmp/fwidx/meta/fw" "$DEVICE_LIST" <<'PY'
+          import json, os, sys
+          outdir, tag, commit, kver, btime, idxdir, devices = sys.argv[1:8]
+          files = sorted(os.listdir(outdir))
+          for dev in devices.split():
+              up = None
+              for f in files:
+                  if f.endswith('.sha256'):
+                      continue
+                  if dev in f and 'sysupgrade' in f and f.endswith('.itb'):
+                      up = f
+                      break
+              if not up:
+                  print('WARN: %s 没有 sysupgrade 产物，跳过索引' % dev)
+                  continue
+              sha = ''
+              shafile = os.path.join(outdir, up + '.sha256')
+              if os.path.isfile(shafile):
+                  sha = open(shafile, encoding='utf-8').read().split()[0]
+              man = None
+              for f in files:
+                  if f.endswith('.sha256'):
+                      continue
+                  if dev in f and 'manifest' in f:
+                      man = f
+                      break
+              url = 'https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases/download/%s/%s' % (tag, up)
+              d = {
+                  'schema': 1,
+                  'device': dev,
+                  'tag': tag,
+                  'run': int(os.environ.get('GITHUB_RUN_NUMBER', '0') or 0),
+                  'commit': commit,
+                  'kernel_version': kver,
+                  'built_at': btime,
+                  'sysupgrade': {'name': up, 'sha256': sha, 'url': url},
+              }
+              if man:
+                  d['manifest'] = {'name': man, 'url': 'https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases/download/%s/%s' % (tag, man)}
+              path = os.path.join(idxdir, dev + '.json')
+              open(path, 'w', encoding='utf-8').write(json.dumps(d, ensure_ascii=False, indent=2) + '\n')
+              print('index ->', path)
+          PY
+          ls -l /tmp/fwidx/meta/fw
+          git -C /tmp/fwidx add -A
+          git -C /tmp/fwidx -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
+            commit -m "meta(fw): $TAG dev=$DEVICE_LIST" || true
+          for i in 1 2 3; do
+            if git -C /tmp/fwidx push origin repo; then echo ">>> 固件更新索引已发布：meta/fw/"; exit 0; fi
+            git -C /tmp/fwidx fetch origin repo && git -C /tmp/fwidx rebase origin/repo || true
+          done
+          echo "::warning::固件更新索引推送失败（不影响固件产物，下一轮会补）"
