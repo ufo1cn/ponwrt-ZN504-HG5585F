@@ -113,6 +113,15 @@ jobs:
           restore-keys: |
             ponwrt-dl-zn504-
 
+      - name: Add external feeds (树外 kmod-iptv 来源)
+        run: |
+          # kmod-iptv / luci-app-iptv 来自第三方 feed；固件流程必须带上它，
+          # 才能把 kmod-iptv 和固件内核一起编（vermagic 才一致）。
+          if ! grep -q 'src-git iptv ' feeds.conf.default; then
+            printf 'src-git iptv https://github.com/yveming/openwrt-iptv.git\n' >> feeds.conf.default
+          fi
+          grep 'src-git iptv ' feeds.conf.default
+
       - name: Update and install feeds
         run: |
           ./scripts/feeds update -a
