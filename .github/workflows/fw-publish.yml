@@ -1,0 +1,356 @@
+name: Publish firmware to update index
+# 配套 package/luci-app-ponwrt-update：把已编好的固件搬进 apk-repo 的 Release，
+# 再写 meta/fw/<device>.json（字段与 app 读取的完全一致：tag / run /
+# sysupgrade{name,sha256,url}）。app 用 run 与本机 /etc/ponwrt-version 的 run 比大小，
+# 所以这里的 run 必须是【源固件构建 run】的编号，不是本工作流的编号。
+run-name: 发布固件索引 ${{ inputs.devices }}${{ inputs.dry_run && '（dry-run）' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: 要发布的机型
+        type: choice
+        options:
+          - all
+          - ct+5382a
+          - hg5585f-ct
+          - hg5382a
+          - xg040md
+        default: all
+      source_run:
+        description: 源固件构建的 run id（留空=每个机型各取最近一次成功构建）
+        type: string
+        default: ''
+      dry_run:
+        description: 只校验产物、不建 Release 不写索引
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: fw-publish-${{ inputs.devices }}
+  cancel-in-progress: false
+
+env:
+  SRC_REPO: ${{ github.repository }}
+  DST_REPO: ufo1cn/ponwrt-apk-repo
+  IDX_BRANCH: repo
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve publish plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SEL: ${{ inputs.devices }}
+          SRC_RUN: ${{ inputs.source_run }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, subprocess, sys
+
+          # 机型 -> 入口工作流（产物名里都带完整机型名）
+          MAP = {
+              'fiberhome_hg5585f-ct': 'fw-usb-wifi.yml',
+              'fiberhome_hg5382a': 'fw-plain.yml',
+              'nokia_xg-040g-md-ubi': 'fw-usb.yml',
+          }
+          SEL = os.environ['SEL']
+          SRC = os.environ['SRC_REPO']
+          SRC_RUN = os.environ.get('SRC_RUN', '').strip()
+
+          if SEL == 'all':
+              devices = list(MAP)
+          elif SEL == 'ct+5382a':
+              devices = ['fiberhome_hg5585f-ct', 'fiberhome_hg5382a']
+          elif SEL == 'hg5585f-ct':
+              devices = ['fiberhome_hg5585f-ct']
+          elif SEL == 'hg5382a':
+              devices = ['fiberhome_hg5382a']
+          elif SEL == 'xg040md':
+              devices = ['nokia_xg-040g-md-ubi']
+          else:
+              sys.exit('未知机型选择：%s' % SEL)
+
+          rows = []
+          for dev in devices:
+              wf = MAP[dev]
+              if SRC_RUN:
+                  out = subprocess.check_output(
+                      ['gh', 'api', 'repos/%s/actions/runs/%s' % (SRC, SRC_RUN),
+                       '--jq', '[.id,.run_number,.head_sha,.name,.conclusion]|@tsv'],
+                      text=True).strip()
+              else:
+                  out = subprocess.check_output(
+                      ['gh', 'api',
+                       'repos/%s/actions/workflows/%s/runs?status=success&per_page=1' % (SRC, wf),
+                       '--jq', '.workflow_runs[0] | [.id,.run_number,.head_sha,.name,.conclusion]|@tsv'],
+                      text=True).strip()
+              if not out:
+                  sys.exit('机型 %s 找不到可用的成功构建（%s）' % (dev, wf))
+              rid, rnum, sha, name, concl = out.split('\t')
+              if concl and concl != 'success':
+                  sys.exit('源 run %s 结论是 %s，不是 success' % (rid, concl))
+              rows.append((dev, wf, rid, rnum, sha))
+
+          with open('plan.tsv', 'w', encoding='utf-8') as f:
+              for r in rows:
+                  f.write('\t'.join(r) + '\n')
+              print('计划：')
+              for r in rows:
+                  print('  %-22s %-16s run#%-4s id=%s sha=%s' % (r[0], r[1], r[3], r[2], r[4][:10]))
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write('devices=%s\n' % ','.join(r[0] for r in rows))
+          PY
+
+      - name: Download firmware artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r dev wf rid rnum sha; do
+            echo ">>> 下载 $dev 的产物（run #$rnum / $rid）"
+            mkdir -p "dl/$dev"
+            gh run download "$rid" -R "$SRC_REPO" -D "dl/$dev"
+          done < plan.tsv
+          du -sh dl/* | sed 's/^/    /'
+
+      - name: Verify firmware artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, sys
+
+          DEV_LABEL = {
+              'fiberhome_hg5585f-ct': 'HG5585F-CT',
+              'fiberhome_hg5382a': 'HG5382A',
+              'nokia_xg-040g-md-ubi': 'XG-040G-MD',
+          }
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, 'rb') as f:
+                  for b in iter(lambda: f.read(1 << 20), b''):
+                      h.update(b)
+              return h.hexdigest()
+
+          plan = []
+          for line in open('plan.tsv', encoding='utf-8'):
+              dev, wf, rid, rnum, sha = line.rstrip('\n').split('\t')
+              plan.append((dev, wf, rid, rnum, sha))
+
+          prepared = []
+          errors = []
+          for dev, wf, rid, rnum, commit in plan:
+              root = os.path.join('dl', dev)
+              itbs, infos = [], []
+              for base, _, files in os.walk(root):
+                  for fn in files:
+                      p = os.path.join(base, fn)
+                      # SFP 变体的机器名是 fiberhome_hg5585f-ct 的前缀扩展，必须排除
+                      if fn.endswith('.itb') and 'sysupgrade' in fn and not fn.endswith('.itb.sha256'):
+                          if dev in fn and 'sfp' not in fn:
+                              itbs.append(p)
+                      if fn == 'build-info.txt':
+                          infos.append(p)
+              if not itbs:
+                  errors.append('%s：产物里没有 %s 的 sysupgrade .itb' % (dev, dev))
+                  continue
+              if len(itbs) > 1:
+                  # 多份时取文件名最短（通常就是标准名），其余打印出来备查
+                  itbs.sort(key=lambda p: (len(os.path.basename(p)), p))
+              up = itbs[0]
+              for extra in itbs[1:]:
+                  print('    另外发现（未采用）：%s' % os.path.basename(extra))
+              size = os.path.getsize(up)
+              real = sha256(up)
+              side = None
+              if os.path.isfile(up + '.sha256'):
+                  side = open(up + '.sha256', encoding='utf-8').read().split()[0].lower()
+              if side and side != real:
+                  errors.append('%s：.sha256 旁注（%s）与实际（%s）不一致' % (dev, side, real))
+                  continue
+
+              info = {}
+              if infos:
+                  for line in open(infos[0], encoding='utf-8'):
+                      if '=' in line:
+                          k, v = line.strip().split('=', 1)
+                          info[k] = v
+              else:
+                  errors.append('%s：产物里没有 build-info.txt，无法确定源 run/commit' % dev)
+                  continue
+
+              built_run = info.get('run', '').strip()
+              if built_run != rnum:
+                  errors.append('%s：build-info.txt 的 run=%s 与源 run#%s 不一致' % (dev, built_run, rnum))
+                  continue
+
+              outdir = os.path.join('prep', dev)
+              os.makedirs(outdir, exist_ok=True)
+              base = os.path.basename(up)
+              dst = os.path.join(outdir, base)
+              os.replace(up, dst)
+              with open(dst + '.sha256', 'w', encoding='utf-8') as f:
+                  f.write('%s  %s\n' % (real, base))
+              man = None
+              for base2, _, files in os.walk(root):
+                  for fn in files:
+                      if 'manifest' in fn and dev in fn and not fn.endswith('.sha256'):
+                          man = os.path.join(base2, fn)
+              if man:
+                  os.replace(man, os.path.join(outdir, os.path.basename(man)))
+
+              meta = {
+                  'device': dev,
+                  'label': DEV_LABEL.get(dev, dev),
+                  'workflow': wf,
+                  'source_run_id': int(rid),
+                  'run': int(built_run),
+                  'commit': info.get('commit') or commit,
+                  'kernel_version': info.get('kernel_version', 'unknown'),
+                  'built_at': info.get('built_at', ''),
+                  'name': base,
+                  'sha256': real,
+                  'size': size,
+                  'manifest': os.path.basename(man) if man else None,
+                  'dir': outdir,
+              }
+              with open(os.path.join(outdir, 'index-meta.json'), 'w', encoding='utf-8') as f:
+                  json.dump(meta, f, ensure_ascii=False, indent=2)
+              prepared.append(meta)
+              print('>>> %s  %s  %.2f MiB  sha256=%s  run=%s' % (
+                  dev, base, size / 1048576.0, real[:16], built_run))
+
+          if errors:
+              for e in errors:
+                  print('::error::%s' % e)
+              sys.exit(1)
+          if not prepared:
+              sys.exit('::error::没有任何可发布的固件')
+          with open('prepared.json', 'w', encoding='utf-8') as f:
+              json.dump(prepared, f, ensure_ascii=False, indent=2)
+          PY
+
+      - name: Publish release in apk repo
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::缺少 APK_REPO_TOKEN，无法在 apk-repo 建 Release"
+            exit 1
+          fi
+          python3 - <<'PY' > rels.tsv
+          import json
+          for m in json.load(open('prepared.json', encoding='utf-8')):
+              tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
+              print('\t'.join([m['device'], tag, m['name'], m['dir']]))
+          PY
+          while IFS=$'\t' read -r dev tag name dir; do
+            echo ">>> 上传 $dev -> $tag"
+            files=("$dir/$name" "$dir/$name.sha256")
+            man=$(python3 -c "import json;m=[x for x in json.load(open('prepared.json',encoding='utf-8')) if x['device']=='$dev'][0];print(m['manifest'] or '')")
+            [ -n "$man" ] && files+=("$dir/$man")
+            notes="PonWrt 固件 $dev
+          源构建 run：$tag
+          镜像：$name
+          sha256 见同名 .sha256 附件；索引由 meta/fw/$dev.json 指向本 Release。"
+            gh release create "$tag" -R "$DST_REPO" --title "$dev $tag" --notes "$notes" "${files[@]}" \
+              || gh release upload "$tag" -R "$DST_REPO" --clobber "${files[@]}"
+          done < rels.tsv
+
+      - name: Update firmware index in apk repo
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::缺少 APK_REPO_TOKEN"; exit 1; }
+          rm -rf idx
+          git clone --depth=1 --branch "$IDX_BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${DST_REPO}.git" idx \
+            || { echo "::error::apk-repo 的 $IDX_BRANCH 分支取不到"; exit 1; }
+          python3 - "$DST_REPO" <<'PY'
+          import json, os, sys
+          dst = sys.argv[1]
+          idxdir = os.path.join('idx', 'meta', 'fw')
+          os.makedirs(idxdir, exist_ok=True)
+          for m in json.load(open('prepared.json', encoding='utf-8')):
+              tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
+              url = 'https://github.com/%s/releases/download/%s/%s' % (dst, tag, m['name'])
+              d = {
+                  'schema': 1,
+                  'device': m['device'],
+                  'tag': tag,
+                  # app 用这个 run 与本机版本戳里的 run 比较，必须写源构建的 run
+                  'run': m['run'],
+                  'source_run_id': m['source_run_id'],
+                  'source_workflow': m['workflow'],
+                  'commit': m['commit'],
+                  'kernel_version': m['kernel_version'],
+                  'built_at': m['built_at'],
+                  'sysupgrade': {
+                      'name': m['name'],
+                      'sha256': m['sha256'],
+                      'size': m['size'],
+                      'url': url,
+                  },
+              }
+              if m.get('manifest'):
+                  d['manifest'] = {
+                      'name': m['manifest'],
+                      'url': 'https://github.com/%s/releases/download/%s/%s' % (dst, tag, m['manifest']),
+                  }
+              p = os.path.join(idxdir, m['device'] + '.json')
+              with open(p, 'w', encoding='utf-8') as f:
+                  f.write(json.dumps(d, ensure_ascii=False, indent=2) + '\n')
+              print('index ->', p)
+              print('  tag=%s run=%s' % (tag, m['run']))
+          PY
+          git -C idx add -A
+          devs=$(ls prep | paste -sd, -)
+          git -C idx -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
+            commit -m "meta(fw): $(date -u +%Y-%m-%dT%H:%MZ) devices=$devs" || true
+          for i in 1 2 3; do
+            if git -C idx push origin "$IDX_BRANCH"; then
+              echo ">>> 索引已推送：meta/fw/"
+              break
+            fi
+            git -C idx fetch origin "$IDX_BRANCH" && git -C idx rebase "origin/$IDX_BRANCH" || true
+            [ "$i" = 3 ] && { echo "::error::索引推送三次都失败"; exit 1; }
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "## 固件索引发布结果"
+            echo
+            echo "| 机型 | 源 run | tag | 镜像 | 大小 | dry-run |"
+            echo "|---|---|---|---|---|---|"
+            python3 - <<'PY'
+          import json, os
+          if os.path.isfile('prepared.json'):
+              for m in json.load(open('prepared.json', encoding='utf-8')):
+                  tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
+                  print('| %s | %s | %s | %s | %.2f MiB | %s |' % (
+                      m['label'], m['run'], tag, m['name'], m['size'] / 1048576.0,
+                      os.environ.get('DRY', '?')))
+          PY
+            echo
+            echo "索引下载地址：https://raw.githubusercontent.com/${DST_REPO}/${IDX_BRANCH}/meta/fw/<device>.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DRY: ${{ inputs.dry_run }}
