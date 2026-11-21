@@ -266,11 +266,12 @@ jobs:
 
           # 强制 base-files 重编：build_dir 缓存会保留上一次的 signing key，
           # 不清掉的话镜像里 /etc/apk/keys/public-key.pem 还是旧 key。
-          # 同时在 repositories.d 里留一条（默认注释，避免无外网时 apk update 卡超时）
+          # 同时在 repositories.d 里留一条（apk v3 对目录 URL 会去取 <url>/<arch>/APKINDEX.tar.gz 直接 404，
+          # 所以这里必须指到索引文件本身 packages.adb；实测 apk update/search 可直连）
           mkdir -p package/base-files/files/etc/apk/repositories.d
           printf '%s\n' \
             '# PonWrt 自建 apk 源（与固件同一把私钥签名）；该地址不可达时把下一行注释掉并把包拷进设备离线安装' \
-            'https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt' \
+            'https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt/packages.adb' \
             > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
           cat package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
 
