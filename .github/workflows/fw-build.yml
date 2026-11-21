@@ -364,8 +364,17 @@ jobs:
           cur=$(sed -n 's/^run=//p' "$VF" | head -n1)
           echo "本地：device=$dev run=$cur feature_class=$(sed -n 's/^feature_class=//p' "$VF" | head -n1)"
           [ -n "$dev" ] || { echo "本地版本文件里没有 device 字段"; exit 1; }
+          # 代理：PONWRT_PROXY > /etc/ponwrt-update.conf 的 PROXY= > 系统的 http(s)_proxy > 直连
+          PROXY="${PONWRT_PROXY:-}"
+          if [ -z "$PROXY" ] && [ -f /etc/ponwrt-update.conf ]; then
+            PROXY=$(sed -n 's/^PROXY=//p' /etc/ponwrt-update.conf | head -n1)
+          fi
+          [ -n "$PROXY" ] || PROXY="${https_proxy:-${http_proxy:-}}"
+          PROXYARG=""
+          [ -n "$PROXY" ] && PROXYARG="--proxy $PROXY"
+          echo "代理：${PROXY:-直连}"
           tmp=$(mktemp) || exit 1
-          if ! curl -fsSL --connect-timeout 10 --retry 2 "$IDX_BASE/$dev.json" -o "$tmp"; then
+          if ! curl -fsSL $PROXYARG --connect-timeout 10 --retry 2 "$IDX_BASE/$dev.json" -o "$tmp"; then
             echo "拉取更新索引失败：$IDX_BASE/$dev.json（检查本机能否访问 raw.githubusercontent.com）"
             rm -f "$tmp"; exit 2
           fi
@@ -390,6 +399,19 @@ jobs:
           fi
           echo "已是最新固件（索引 tag=$tag run=$newrun）"
           EOF
+          cat > files/etc/ponwrt-update.conf <<'EOF'
+          # PonWrt 更新检查用的出站代理（留空=直连；也可在设备上 export PONWRT_PROXY 覆盖）
+          # 例：PROXY=http://127.0.0.1:7890   （mihomo/sing-box 的 mixed/http 端口）
+          PROXY=
+          EOF
+          cat > files/etc/profile.d/ponwrt-proxy.sh <<'EOF'
+          # 让交互式 shell 里的 apk/curl 走 /etc/ponwrt-update.conf 里配置的代理
+          [ -f /etc/ponwrt-update.conf ] && . /etc/ponwrt-update.conf
+          if [ -n "${PROXY:-}" ]; then
+            export http_proxy="$PROXY" https_proxy="$PROXY" all_proxy="$PROXY"
+          fi
+          EOF
+          chmod +x files/etc/profile.d/ponwrt-proxy.sh
           chmod +x files/usr/bin/ponwrt-fw-check
           echo ">>> 注入完成："
           cat files/etc/ponwrt-version
