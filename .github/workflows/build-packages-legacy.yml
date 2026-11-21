@@ -7,6 +7,9 @@ name: Build Packages (legacy | 旧仓有、新仓无的用户态软件) manual
 #       的清单里没有。这里在**新仓同一内核源码树**上重新编成 apk，签同一把固定私钥。
 #       产物只发本仓 prerelease 与 artifact；进软件仓库（能力分组目录 + 签名索引）
 #       统一由 .github/workflows/pkg-publish.yml 做，本文件不 push apk-repo。
+# 5) kmod 归属：本流程只编用户态包；kmod 一律由固件构建流程 fw-build.yml 在同一次
+#    构建里编成 apk，随固件 artifact 与 kmods-<label>-r<run> 预发布交付，
+#    再由 pkg-publish.yml 统一搬进软件仓库。
 #
 # 清单：configs/pon-legacy-packages.txt
 #   auto|<apk>|<required|optional>   —— auto 表示由本工作流解析源码目录
@@ -289,7 +292,7 @@ jobs:
           make -j"$(nproc)" tools/compile
           make -j"$(nproc)" toolchain/compile
 
-      - name: Build kernel tree (kmod ABI 来源)
+      - name: Build kernel tree (用户态包所需的内核头与 staging)
         # 必需：任何 kmod 依赖（gpio-button-hotplug、kmod-wireguard 等）都要内核 .config 与内核树。
         # 旧版这里写成 `if: inputs.with_kernel`，with_kernel=false 时整步被跳过 → kmod 0.2s 失败被 `|| true` 吞掉，
         # 随后逐个上层包连环"编译失败"（run #9 的 12 个 FAIL 就是这么来的）。
@@ -298,11 +301,8 @@ jobs:
           make -j"$(nproc)" target/linux/compile
           make -j"$(nproc)" target/linux/install || true
 
-      - name: Build kernel modules selected by config
-        run: |
-          set -euo pipefail
-          make -j"$(nproc)" package/kernel/linux/compile || true
-
+      # kmod 不在这里编：统一由固件构建流程（fw-build.yml）编译并作为 apk 发布，
+      # 保证 build/src/ABI 与固件同一次构建一致（清单见 configs/features/kmod-repo.config）
       - name: Build legacy packages (no silent drop)
         run: |
           set -euo pipefail
@@ -486,7 +486,7 @@ jobs:
             staging_dir/host
           key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-${{ github.run_id }}
 
-      - name: Check kmod ABI against firmware baseline
+      - name: Check source tree matches firmware baseline (informational)
         if: always()
         run: |
           set -uo pipefail
@@ -502,8 +502,8 @@ jobs:
             exit 0
           fi
           if [ "$fw" != "$got" ]; then
-            echo "::error::内核版本与固件不一致：固件=$fw 本树=$got；这些 kmod 装到固件上会 ABI 不匹配"
-            exit 1
+            # 本流程只编用户态包（kmod 由固件流程编），版本不一致只提示，不拦
+            echo "::warning::源码树内核 $got 与固件基线 $fw 不一致；用户态包不受影响，kmod 请用固件流程的产物"
           fi
           echo ">>> ABI 核对通过：$fw"
 
