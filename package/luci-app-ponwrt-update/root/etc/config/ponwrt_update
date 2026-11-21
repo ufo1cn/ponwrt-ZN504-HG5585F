@@ -1,0 +1,9 @@
+config settings 'settings'
+	# 出站方式：direct = 直连（不走任何代理）
+	#           proxy = 使用下面配置的 HTTP/SOCKS 代理端口
+	#           transparent = 透明代理（mihomo TUN / nftables redir 已生效，这里不再传代理）
+	option mode 'direct'
+	# mode=proxy 时生效，例：http://127.0.0.1:7890 或 socks5h://127.0.0.1:7891
+	option proxy ''
+	# 固件更新索引的仓库地址（目录形式，实际取 <index_base>/<device>.json）
+	option index_base 'https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/fw'
