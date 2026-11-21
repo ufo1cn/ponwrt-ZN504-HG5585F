@@ -183,10 +183,10 @@ jobs:
         run: |
           set -euo pipefail
           # 先删同名行，避免和我方新加的重复
-          sed -i '/src-git nikki /d;/src-git iptv /d;/src-git homeproxy /d;/src-git passwall2 /d' feeds.conf.default
+          sed -i '/src-git nikki /d;/src-git homeproxy /d;/src-git passwall2 /d' feeds.conf.default
           cat >> feeds.conf.default <<'EOF'
           src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main
-          src-git iptv https://github.com/yveming/openwrt-iptv.git
+          # iptv feed 不再注入：kmod-iptv 与其上层已移交固件流程 fw-build.yml
           src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master
           src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main
           EOF
@@ -282,8 +282,8 @@ jobs:
             || { echo "::error::机型符号未落地: $DEVICE"; exit 1; }
 
           # 关键选择落地自检（缺失即报错，不靠放松依赖绕过）
-          for sym in CONFIG_PACKAGE_kmod-iptv CONFIG_PACKAGE_luci-app-iptv \
-                     CONFIG_PACKAGE_luci-app-passwall2 CONFIG_PACKAGE_xray-core \
+          # iptv 已整体移交固件流程，这里只自检本流程仍要编的包
+          for sym in CONFIG_PACKAGE_luci-app-passwall2 CONFIG_PACKAGE_xray-core \
                      CONFIG_PACKAGE_lyaml; do
             grep -q "^${sym}=m" .config || { echo "::error::符号未落地: $sym"; exit 1; }
           done
