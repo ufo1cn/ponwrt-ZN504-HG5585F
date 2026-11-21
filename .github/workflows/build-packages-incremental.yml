@@ -7,12 +7,14 @@ name: Build Packages (same kernel tree, incremental) manual
 # 1) 与固件同源同 ABI：本工作流用 configs/an7581.config + release.config +
 #    pon-packages/*.config 生成与固件完全一致的 .config，先编 host 工具链、
 #    再编 target/linux（内核树），最后才编 kmod 与上层包。kmod 的 vermagic
-#    因此和 build-firmware-manual.yml 出来的固件逐字节一致，apk 可直接装。
+#    因此和 fw-build.yml（三条 fw-* 入口）出来的固件逐字节一致，apk 可直接装。
 # 2) 增量：dl / .ccache / build_dir / staging_dir 全部走滚动缓存（key 带 run_id，
 #    restore-keys 前缀命中上一轮），命中后 make 自身按时间戳跳过未变目标；
 #    再配合 inputs.only 只编指定包，单个包改动只重编该包及其依赖。
 # 3) 不静默丢弃：按 configs/pon-userspace-packages.txt 逐包核对真实 apk，
 #    缺包、目录缺失、编译失败都会让 job 失败并在 summary 里列出。
+# 4) 发布口径：本文件只出 artifact 与本仓 prerelease，**不 push apk-repo**；
+#    进软件仓库（能力分组目录 + 签名索引）统一由 .github/workflows/pkg-publish.yml 做。
 # ==============================================================================
 
 on:
@@ -534,113 +536,6 @@ jobs:
             staging_dir/host
           key: ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-${{ github.run_id }}
 
-      - name: Build apk index and publish to apk repo
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
-        run: |
-          set -uo pipefail
-          shopt -s nullglob
-          # 内核版本：优先读本次编出的 kernel.release；没编内核时按源码树里的
-          # KERNEL_PATCHVER + LINUX_VERSION-<pv> 推出来（apk 的兼容键就是它）
-          KVER=$(cat build_dir/target-*/linux-*/include/config/kernel.release 2>/dev/null | head -n1 || true)
-          if [ -z "$KVER" ]; then
-            pv=$(awk -F':=' '/^KERNEL_PATCHVER/ {print $2; exit}' target/linux/airoha/Makefile | tr -d '[:space:]')
-            suf=$(awk -v p="$pv" '$1=="LINUX_VERSION-"p {gsub(/ /,"",$3); print $3; exit}' "target/linux/generic/kernel-$pv" 2>/dev/null || true)
-            KVER="${pv}${suf}"
-          fi
-          [ -n "$KVER" ] || { echo "::error::无法确定内核版本，拒绝发布（否则 apk 目录没法按 ABI 归类）"; exit 1; }
-          echo ">>> 本次内核版本：$KVER（目录 ponwrt-k$KVER）"
-          files=(output/*.apk)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::warning::本次没有 apk，跳过索引生成"
-            exit 0
-          fi
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::未配置 APK_REPO_TOKEN，跳过仓库索引推送"
-            exit 0
-          fi
-          APKBIN=""
-          for c in staging_dir/host/bin/apk build_dir/host*/apk-*/apk; do
-            if [ -x "$c" ]; then APKBIN="$c"; break; fi
-          done
-          if [ -z "$APKBIN" ]; then
-            echo "::warning::找不到 host 版 apk 工具，跳过索引生成（apk 仍可单独下载安装）"
-            exit 0
-          fi
-          echo ">>> host apk: $APKBIN"
-          "$APKBIN" --version || true
-
-          # 按能力分索引：规则见 configs/pon-feature-packages.txt（能力|通配），
-          # 未命中任何能力的包一律进 common。这样 HG5382A 只看 common，看不到 USB 包。
-          FEAT_FILE="configs/pon-feature-packages.txt"
-          feature_of() {
-            local b feat pats p
-            b=$(basename "$1")
-            if [ -f "$FEAT_FILE" ]; then
-              while IFS='|' read -r feat pats; do
-                case "$feat" in ''|'#'*) continue ;; esac
-                for p in $pats; do
-                  case "$b" in $p) echo "$feat"; return ;; esac
-                done
-              done < "$FEAT_FILE"
-            fi
-            echo common
-          }
-          rm -rf /tmp/stage && mkdir -p /tmp/stage
-          for f in "${files[@]}"; do
-            feat=$(feature_of "$f")
-            mkdir -p "/tmp/stage/$feat"
-            cp -f "$f" "/tmp/stage/$feat"/
-          done
-          echo ">>> 能力分组：$(for d in /tmp/stage/*/; do echo -n "$(basename "$d")=$(ls -1 "$d"*.apk 2>/dev/null | wc -l) "; done)"
-
-          SIGN_ARG=""
-          if [ -f "$PWD/private-key.pem" ]; then SIGN_ARG="--sign $PWD/private-key.pem"; fi
-          rm -rf /tmp/idx && mkdir -p /tmp/idx
-          for d in /tmp/stage/*/; do
-            feat=$(basename "$d")
-            # mkndx 是 v3 ADB 索引生成器；apk index 是 v2（遇到 v3 包直接报 file format not supported）
-            if ! "$APKBIN" mkndx --root "$PWD" --keys-dir "$PWD" --allow-untrusted $SIGN_ARG \
-                   --output "/tmp/idx/$feat.adb" "$d"*.apk 2>"/tmp/idx/$feat.err"; then
-              cat "/tmp/idx/$feat.err" || true
-              echo "::error::$feat 索引生成失败"
-              exit 1
-            fi
-            ls -l "/tmp/idx/$feat.adb"
-          done
-
-          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
-          rm -rf /tmp/apkrepo
-          if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/apkrepo 2>/dev/null; then
-            git clone --depth=1 "$REPO_URL" /tmp/apkrepo
-            git -C /tmp/apkrepo checkout -b repo
-          fi
-          for d in /tmp/stage/*/; do
-            feat=$(basename "$d")
-            DEST="/tmp/apkrepo/aarch64_cortex-a53/ponwrt-k${KVER}/$feat"
-            mkdir -p "$DEST"
-            cp -f "$d"*.apk "$DEST"/
-            cp -f "/tmp/idx/$feat.adb" "$DEST/packages.adb"
-            ( cd "$DEST" && sha256sum ./*.apk > SHA256SUMS )
-            echo ">>> 已放入 ponwrt-k${KVER}/$feat（$(ls -1 "$DEST"/*.apk | wc -l) 个 apk）"
-          done
-          git -C /tmp/apkrepo add -A
-          git -C /tmp/apkrepo -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
-            commit -m "repo: run=${{ github.run_number }} device=${{ inputs.device }} k=$KVER feat=$(ls -1 /tmp/stage | tr '\n' ',')" || true
-          pushed=0
-          for i in 1 2 3; do
-            if git -C /tmp/apkrepo push origin repo; then pushed=1; break; fi
-            echo ">>> 推送被拒，第 $i 次 rebase 重试"
-            git -C /tmp/apkrepo fetch origin repo && git -C /tmp/apkrepo rebase origin/repo || true
-          done
-          if [ "$pushed" != "1" ]; then
-            echo "::error::在线源推送失败（apk 已进 Release，但 raw 目录未更新）"
-            exit 1
-          fi
-          echo ">>> 在线源：https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt-k${KVER}/common"
-
-
       - name: Check kmod ABI against firmware baseline
         if: always()
         run: |
@@ -662,6 +557,25 @@ jobs:
           fi
           echo ">>> ABI 核对通过：$fw"
 
+      - name: Stage host apk tool for the publish workflow
+        if: always()
+        run: |
+          set -uo pipefail
+          # pkg-publish.yml 用同一份 host apk 生成并签名索引，避免两处工具版本不一致
+          mkdir -p pubtool
+          for c in staging_dir/host/bin/apk build_dir/host*/apk-*/apk; do
+            if [ -f "$c" ] && [ -x "$c" ]; then
+              cp -f "$c" pubtool/apk
+              chmod +x pubtool/apk
+              break
+            fi
+          done
+          if [ -x pubtool/apk ]; then
+            ./pubtool/apk --version || true
+            sha256sum pubtool/apk
+          else
+            echo "::warning::本 run 没有可用的 host apk，publish 工作流需要它来签索引"
+          fi
       - name: Upload packages artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -671,6 +585,7 @@ jobs:
             output/*
             build_log/package-summary.txt
             build_log/*.log
+            pubtool/apk
           retention-days: 14
 
       - name: Publish prerelease (apk + public key, 长期保留)
