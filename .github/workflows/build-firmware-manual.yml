@@ -175,77 +175,94 @@ jobs:
           echo ">>> 机型锁定完成（未再执行 defconfig）"
 
           # ------------------------------------------------------------------
-          # XG-040G-MD（有 USB、没有内置无线）的配置改写
+          # 机型能力 -> 配置片段（configs/features/<能力>.config）
           #
-          #   1) 关内置 WiFi：configs/release.config 把 kmod-mt7915e /
-          #      kmod-mt7916-firmware 设成 =y（那是 HG5585F 的 MT7916 内置无线），
-          #      本机没有这组硬件，留着只会白占镜像 + 开机报找不到设备。
-          #      只关 PACKAGE 符号，保留 kmod-mt76-core/-connac（USB 无线网卡
-          #      mt76x0u / mt76x2u / mt7921u 都依赖它们）。
-          #   2) 补全 USB 栈：全部按 =m 编（编出来的 apk 进仓库 usb 能力目录，
-          #      设备上 apk add 按需装；镜像本身由机型 profile 带 kmod-usb3 /
-          #      xhci / storage，插上就能用）。
-          #   3) USB 无线网卡驱动也要编（插 USB 网卡用），同样 =m 进 usb 目录。
+          #   能力表 = configs/device-features.txt（<机型>|<能力...>），与本工作流
+          #   后面写 apk 仓库源用的是同一张表。每个能力对应一份片段，片段每行要么
+          #   `CONFIG_X=y|m`，要么 `# CONFIG_X is not set`；
+          #   应用方式：把该符号的旧行删干净，再按片段写回 .config（不再 defconfig，
+          #   否则刚锁定的机型行会被重算掉）。
           #
-          # 全部只改 .config 文本，不再 defconfig（否则机型行会被重算掉）。
+          #   当前：HG5585F-CT = usb wifi（USB 栈 + 内置 MT7916 无线）
+          #         HG5382A    = 无（镜像里不放无线 / USB 软件）
+          #         XG-040G-MD = usb（有 USB、无内置无线；USB 网卡驱动也在 usb 片段）
+          #   新机型只在能力表加一行，这段逻辑不用动。
           # ------------------------------------------------------------------
-          if [ "${{ inputs.devices }}" = "xg040md" ]; then
-            echo ">>> XG-040G-MD：关闭内置 WiFi，补全 USB 栈与 USB 无线网卡驱动"
-            for s in kmod-mt7915e kmod-mt7916-firmware; do
-              sed -i "/^CONFIG_PACKAGE_${s}=/d; /^CONFIG_MODULE_DEFAULT_${s}=/d" .config
-              printf '# CONFIG_PACKAGE_%s is not set\n' "$s" >> .config
+          features_of() {
+            local dev line block out
+            dev="$1"; out=""
+            line=$(grep -E "^[[:space:]]*${dev}[[:space:]]*\|" configs/device-features.txt 2>/dev/null | head -n1 || true)
+            if [ -n "$line" ]; then printf '%s' "${line#*|}"; return 0; fi
+            block=$(awk -v d="$dev" 'index($0,"define Device/" d)==1 {f=1;next} f&&/^endef/{exit} f' target/linux/airoha/image/*.mk 2>/dev/null || true)
+            if echo "$block" | grep -qiE 'kmod-usb'; then out="$out usb"; fi
+            printf '%s' "$out"
+          }
+          CAPS=""
+          for dev in $DEVICES; do
+            for c in $(features_of "$dev"); do
+              case " $CAPS " in *" $c "*) ;; *) CAPS="$CAPS $c" ;; esac
             done
-            wifi_leak=0
-            for s in kmod-mt7915e kmod-mt7916-firmware kmod-mt7915-firmware kmod-mt7615e; do
-              if grep -q "^CONFIG_PACKAGE_${s}=[ym]" .config; then
-                echo "::error::XG-040G-MD 仍然把内置 WiFi 包选中了: ${s}=$(grep "^CONFIG_PACKAGE_${s}=" .config | cut -d= -f2)"
-                wifi_leak=1
-              fi
-            done
-            [ "$wifi_leak" = "0" ] || exit 1
+          done
+          echo ">>> 机型 $DEVICES 能力：${CAPS:-（无：只编公共部件）}"
+          echo "CAPS=$CAPS" >> "$GITHUB_ENV"
 
-            # USB 主机/网络/串口/存储/摄像头/IP 透传 + USB 无线网卡
-            USB_PKGS="kmod-usb2 kmod-usb-common kmod-usbmon \
-              kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm \
-              kmod-usb-net-cdc-mbim kmod-usb-net-cdc-eem kmod-usb-net-cdc-subset \
-              kmod-usb-net-rndis kmod-usb-net-ipheth kmod-usb-net-huawei-cdc-ncm \
-              kmod-usb-net-qmi-wwan kmod-usb-net-qmi-wwan-quectel kmod-usb-net-qmi-wwan-fibocom \
-              kmod-usb-net-rtl8152 kmod-usb-net-rtl8152-vendor kmod-usb-net-asix \
-              kmod-usb-net-asix-ax88179 kmod-usb-net-aqc111 kmod-usb-net-smsc95xx \
-              kmod-usb-net-lan78xx kmod-usb-net-sr9700 kmod-usb-net-hso \
-              kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x \
-              kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-serial-option \
-              kmod-usb-serial-qualcomm kmod-usb-serial-mos7720 kmod-usb-serial-mos7840 \
-              kmod-usb-serial-simple kmod-usb-storage-extras kmod-usb-hid \
-              kmod-usb-acm kmod-usb-printer kmod-usb-wdm \
-              kmod-usbip kmod-usbip-client kmod-usbip-server usbip usbutils \
-              kmod-ath9k-htc kmod-carl9170 kmod-mt7601u kmod-mt76x0u kmod-mt76x2u \
-              kmod-mt7663u kmod-mt7921u kmod-rtl8xxxu kmod-rtl8188eu kmod-rtl8192cu \
-              kmod-rtl8192du kmod-rtw88-8723du kmod-rtw88-8812au kmod-rtw88-8814au \
-              kmod-rtw88-8821au kmod-rtw88-8821cu kmod-rtw88-8822bu kmod-rtw88-8822cu"
-            n_ok=0; n_miss=0
-            for s in $USB_PKGS; do
-              # defconfig 之后每个「仓库里真实存在」的包符号都会出现在 .config，
-              # 所以先确认符号存在，避免写进一个不存在的包名（会静默不编）
-              if ! grep -qE "^(# )?CONFIG_PACKAGE_${s}(=| is not set)" .config; then
-                echo "::warning::符号不存在，跳过: ${s}（packages feed 里没有这个包）"
-                n_miss=$((n_miss+1)); continue
+          APPLY_CAPS="$CAPS"
+          case " $CAPS " in
+            *" wifi "*) ;;
+            *) APPLY_CAPS="$APPLY_CAPS no-wifi"
+               echo ">>> 本机型没有内置无线：追加 no-wifi 片段（关掉 release.config 的 mt7915e/mt7916）" ;;
+          esac
+
+          n_frag=0; missing_syms=""
+          for c in $APPLY_CAPS; do
+            f="configs/features/${c}.config"
+            if [ ! -f "$f" ]; then
+              echo "::warning::能力 ${c} 没有对应片段 $f，跳过"
+              continue
+            fi
+            echo ">>> 应用能力片段: $f"
+            while IFS= read -r line; do
+              case "$line" in
+                '# CONFIG_PACKAGE_'*' is not set')
+                  sym=${line#\# }; sym=${sym%% is not set*}; val="notset" ;;
+                'CONFIG_PACKAGE_'*=*)
+                  sym=${line%%=*}; val=${line#*=} ;;
+                *) continue ;;
+              esac
+              # 符号必须真实存在于本次源码树（defconfig 之后每个可用包符号都在
+              # .config 里），不存在只告警——写进一个不存在的包名会静默不编
+              grep -qE "^(# )?${sym}(=| is not set)" .config || missing_syms="$missing_syms ${sym}"
+              sed -i "/^${sym}=/d; /^# ${sym} is not set/d" .config
+              if [ "$val" = "notset" ]; then
+                printf '# %s is not set\n' "$sym" >> .config
+              else
+                printf '%s=%s\n' "$sym" "$val" >> .config
               fi
-              grep -q "^CONFIG_PACKAGE_${s}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$s" >> .config
-              n_ok=$((n_ok+1))
+              n_frag=$((n_frag+1))
+            done < "$f"
+          done
+          echo ">>> 能力片段共应用 $n_frag 个符号"
+          [ -z "$missing_syms" ] || echo "::warning::以下符号在当前源码树里不存在（照写但不会被编）:${missing_syms}"
+
+          # 硬校验：能力要求的必须真的落地，能力没要的必须真的不在
+          has_cap() { case " $CAPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac ; }
+          if has_cap usb; then
+            for s in kmod-usb-core kmod-usb-net; do
+              grep -q "^CONFIG_PACKAGE_${s}=[my]" .config \
+                || { echo "::error::usb 能力已启用，但 .config 里缺 ${s}"; exit 1; }
             done
-            echo ">>> USB 包已选中(含原有): $n_ok 个，符号不存在跳过: $n_miss 个"
-            # 硬校验：内置 WiFi 已关、USB 核心栈在、USB 无线网卡驱动在
+            echo ">>> usb 能力：USB 核心栈已选中"
+          fi
+          if has_cap wifi; then
+            grep -q "^CONFIG_PACKAGE_kmod-mt7915e=y" .config \
+              || { echo "::error::wifi 能力已启用，但 kmod-mt7915e 不是 =y"; exit 1; }
+            echo ">>> wifi 能力：内置无线已进镜像"
+          else
             for s in kmod-mt7915e kmod-mt7916-firmware; do
               grep -q "^# CONFIG_PACKAGE_${s} is not set" .config \
-                || { echo "::error::XG-040G-MD 没有真正关掉内置 WiFi: ${s}"; exit 1; }
+                || { echo "::error::未启用 wifi 能力，但 ${s} 仍被选中"; exit 1; }
             done
-            for s in kmod-usb-core kmod-usb3 kmod-usb-xhci-hcd kmod-usb-storage \
-                     kmod-usb-net kmod-rtl8xxxu kmod-mt76x2u kmod-rtw88-8822bu; do
-              grep -q "^CONFIG_PACKAGE_${s}=[my]" .config \
-                || { echo "::error::XG-040G-MD 缺少必需的 USB 符号: ${s}"; exit 1; }
-            done
-            echo ">>> XG-040G-MD 配置改写完成（内置 WiFi 已关，USB 栈与 USB 无线网卡驱动已在列）"
+            echo ">>> 无 wifi 能力：内置无线已关闭"
           fi
 
       - name: Force base-files rebuild + inject apk repo address
@@ -330,6 +347,54 @@ jobs:
         run: |
           [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
           make -j"$(nproc)" || make -j1 V=s
+
+      - name: Verify image honors device capabilities
+        run: |
+          set -uo pipefail
+          CAPS="${CAPS:-}"
+          echo ">>> 本次机型能力: ${CAPS:-（无）}"
+          has_cap() { case " $CAPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac ; }
+          root=$(ls -d build_dir/target-*/root-* 2>/dev/null | head -n1 || true)
+          [ -n "$root" ] || { echo "::error::找不到 rootfs 目录（build_dir/target-*/root-*）"; exit 1; }
+          echo ">>> rootfs: $root"
+          fail=0
+
+          wifi_found=$(find "$root" -name 'mt7915e.ko*' -o -name 'mt7916*' 2>/dev/null | head -n5 || true)
+          if has_cap wifi; then
+            if [ -z "$wifi_found" ]; then
+              echo "::error::机型能力含 wifi，但 rootfs 里找不到 mt7915e/mt7916 驱动（内置无线没进镜像）"
+              fail=1
+            else
+              echo ">>> wifi 能力核对通过：$(echo "$wifi_found" | head -n1)"
+            fi
+          else
+            if [ -n "$wifi_found" ]; then
+              echo "::error::机型能力不含 wifi，但 rootfs 里带了无线驱动："
+              echo "$wifi_found" | sed 's/^/    /'
+              fail=1
+            else
+              echo ">>> 无 wifi 能力核对通过：rootfs 里没有 mt7915e/mt7916"
+            fi
+          fi
+
+          usb_found=$(find "$root" -name 'usb-common.ko*' 2>/dev/null | head -n5 || true)
+          if has_cap usb; then
+            if [ -z "$usb_found" ]; then
+              echo "::error::机型能力含 usb，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
+              fail=1
+            else
+              echo ">>> usb 能力核对通过：$(echo "$usb_found" | head -n1)"
+            fi
+          else
+            if [ -n "$usb_found" ]; then
+              echo "::error::机型能力不含 usb，但 rootfs 里带了 USB 栈："
+              echo "$usb_found" | sed 's/^/    /'
+              fail=1
+            else
+              echo ">>> 无 usb 能力核对通过：rootfs 里没有 USB 栈"
+            fi
+          fi
+          exit $fail
 
       - name: Record build provenance (源码 commit + 内核版本)
         run: |
@@ -494,6 +559,7 @@ jobs:
             ## 本次手动构建
 
             - 机型：${{ inputs.devices }}（hg5585f-ct / hg5382a / xg040md=nokia_xg-040g-md-ubi）
+            - 机型能力：由 `configs/device-features.txt` 决定，按能力套用 `configs/features/<能力>.config` 片段（usb / wifi / no-wifi）
             - 配置来源：`configs/an7581.config` + `configs/release.config`（不含自有包选装）
             - 内核能力来源：`target/linux/airoha/an7581/config-6.18` 的基础设施符号
             - 工作流基线：上游 `build-zn504.yml`（仅改触发方式、机型锁定与产物收集）
