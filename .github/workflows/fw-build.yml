@@ -241,6 +241,10 @@ jobs:
             done < "$f"
           done
           echo ">>> 能力片段共应用 $n_frag 个符号"
+          # 固件更新 app 必须真的被选中，否则镜像里没有 LuCI 入口（静默变哑巴）
+          grep -q '^CONFIG_PACKAGE_luci-app-ponwrt-update=y' .config \
+            || { echo "::error::.config 里没有 CONFIG_PACKAGE_luci-app-ponwrt-update=y（仓库里的 app 没被编进固件）"; exit 1; }
+          echo ">>> 固件更新 app 已在 .config 里选中"
           [ -z "$missing_syms" ] || echo "::warning::以下符号在当前源码树里不存在（照写但不会被编）:${missing_syms}"
 
           if [ "${{ inputs.bake_usb }}" = "true" ] && has_cap usb; then
@@ -341,7 +345,7 @@ jobs:
           find build_dir/target-* -maxdepth 3 -name '*base-files*' -path '*stamp*' -exec rm -rf {} + 2>/dev/null || true
           echo ">>> base-files 构建状态已清除"
 
-      - name: Inject firmware version stamp and update checker
+      - name: Inject firmware version stamp
         run: |
           set -euo pipefail
           mkdir -p files/etc files/usr/bin
@@ -353,69 +357,10 @@ jobs:
           run=${{ github.run_number }}
           built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EOF
-          cat > files/usr/bin/ponwrt-fw-check <<'EOF'
-          #!/bin/sh
-          # PonWrt 固件更新检查（GitHub Releases 索引，纯 GitHub 方案，无需 ASU 服务端）
-          # 索引地址：https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/fw/<device>.json
-          IDX_BASE="${PONWRT_FW_INDEX:-https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/fw}"
-          VF=/etc/ponwrt-version
-          [ -f "$VF" ] || { echo "缺少 $VF，无法判断本地版本"; exit 1; }
-          dev=$(sed -n 's/^device=//p' "$VF" | head -n1)
-          cur=$(sed -n 's/^run=//p' "$VF" | head -n1)
-          echo "本地：device=$dev run=$cur feature_class=$(sed -n 's/^feature_class=//p' "$VF" | head -n1)"
-          [ -n "$dev" ] || { echo "本地版本文件里没有 device 字段"; exit 1; }
-          # 代理：PONWRT_PROXY > /etc/ponwrt-update.conf 的 PROXY= > 系统的 http(s)_proxy > 直连
-          PROXY="${PONWRT_PROXY:-}"
-          if [ -z "$PROXY" ] && [ -f /etc/ponwrt-update.conf ]; then
-            PROXY=$(sed -n 's/^PROXY=//p' /etc/ponwrt-update.conf | head -n1)
-          fi
-          [ -n "$PROXY" ] || PROXY="${https_proxy:-${http_proxy:-}}"
-          PROXYARG=""
-          [ -n "$PROXY" ] && PROXYARG="--proxy $PROXY"
-          echo "代理：${PROXY:-直连}"
-          tmp=$(mktemp) || exit 1
-          if ! curl -fsSL $PROXYARG --connect-timeout 10 --retry 2 "$IDX_BASE/$dev.json" -o "$tmp"; then
-            echo "拉取更新索引失败：$IDX_BASE/$dev.json（检查本机能否访问 raw.githubusercontent.com）"
-            rm -f "$tmp"; exit 2
-          fi
-          tag=$(jsonfilter -i "$tmp" -e '@.tag' 2>/dev/null)
-          newrun=$(jsonfilter -i "$tmp" -e '@.run' 2>/dev/null)
-          name=$(jsonfilter -i "$tmp" -e '@.sysupgrade.name' 2>/dev/null)
-          sha=$(jsonfilter -i "$tmp" -e '@.sysupgrade.sha256' 2>/dev/null)
-          url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
-          man=$(jsonfilter -i "$tmp" -e '@.manifest.url' 2>/dev/null)
-          rm -f "$tmp"
-          [ -n "$newrun" ] || { echo "索引内容无法解析（tag=$tag）"; exit 3; }
-          if [ "$newrun" -gt "${cur:-0}" ] 2>/dev/null; then
-            echo
-            echo "发现新固件：$tag（run $newrun，本地 run ${cur:-0}）"
-            echo "  镜像：$name"
-            echo "  下载：$url"
-            echo "  sha256：$sha"
-            [ -n "$man" ] && echo "  manifest：$man"
-            echo
-            echo "升级步骤：下载后用 sha256sum -c 校验，再 sysupgrade -k -v <itb>（保留配置）或 sysupgrade -n -v <itb>（不保留）"
-            exit 0
-          fi
-          echo "已是最新固件（索引 tag=$tag run=$newrun）"
-          EOF
-          cat > files/etc/ponwrt-update.conf <<'EOF'
-          # PonWrt 更新检查用的出站代理（留空=直连；也可在设备上 export PONWRT_PROXY 覆盖）
-          # 例：PROXY=http://127.0.0.1:7890   （mihomo/sing-box 的 mixed/http 端口）
-          PROXY=
-          EOF
-          cat > files/etc/profile.d/ponwrt-proxy.sh <<'EOF'
-          # 让交互式 shell 里的 apk/curl 走 /etc/ponwrt-update.conf 里配置的代理
-          [ -f /etc/ponwrt-update.conf ] && . /etc/ponwrt-update.conf
-          if [ -n "${PROXY:-}" ]; then
-            export http_proxy="$PROXY" https_proxy="$PROXY" all_proxy="$PROXY"
-          fi
-          EOF
-          chmod +x files/etc/profile.d/ponwrt-proxy.sh
-          chmod +x files/usr/bin/ponwrt-fw-check
           echo ">>> 注入完成："
           cat files/etc/ponwrt-version
-          sh -n files/usr/bin/ponwrt-fw-check && echo ">>> 更新检查脚本语法 OK"
+          # 检查脚本 / 代理设置 / LuCI 页面都放在 package/luci-app-ponwrt-update 里，
+          # 由包管理器安装（不再往 files/ 塞同名文件，避免两处互相覆盖）
 
       - name: Download package sources
         run: make download -j"$(nproc)"
@@ -643,6 +588,17 @@ jobs:
               *" $b "*) echo ">>> ${b} 固件已收集" ;;
               *) echo "::error::缺少机型 ${b} 的固件（产物收集没匹配到，属于静默丢弃）"; fail=1 ;;
             esac
+          done
+          for f in usr/libexec/rpcd/luci.ponwrt_update usr/bin/ponwrt-update \
+                   usr/bin/ponwrt-fw-check \
+                   www/luci-static/resources/view/ponwrt_update/overview.js \
+                   usr/share/luci/menu.d/luci-app-ponwrt-update.json; do
+            if [ -e "$root/$f" ]; then
+              echo ">>> 固件更新 app 落地: /$f"
+            else
+              echo "::error::rootfs 里缺 /$f（luci-app-ponwrt-update 没进镜像）"
+              fail=1
+            fi
           done
           exit $fail
 
