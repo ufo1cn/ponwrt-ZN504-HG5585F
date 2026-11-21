@@ -22,6 +22,11 @@ on:
           - '使用缓存'
           - '重新编译'
           - '不使用缓存'
+      bake_usb:
+        description: 'USB 驱动烘焙进镜像（true = 全部 =y，插上即用；false = 只编 apk 进仓库按需装）'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -34,4 +39,5 @@ jobs:
       device_list: 'fiberhome_hg5585f-ct'
       upload_release: ${{ inputs.upload_release }}
       cache_mode: ${{ inputs.cache_mode }}
+      bake_usb: ${{ inputs.bake_usb }}
     secrets: inherit
