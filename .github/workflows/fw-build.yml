@@ -756,6 +756,11 @@ jobs:
       - name: Verify requested firmware exists
         run: |
           fail=0
+          # root 是上一步的局部变量，跨步骤不保留（GitHub Actions 每步独立 shell），
+          # 这里必须自己再算一次，否则 $root 为空、所有 /xxx 检查都会假报缺失。
+          root=$(ls -d build_dir/target-*/root-* 2>/dev/null | head -n1 || true)
+          [ -n "$root" ] || { echo "::error::找不到 rootfs 目录（build_dir/target-*/root-*）"; exit 1; }
+          echo ">>> rootfs: $root"
           for b in $DEVICE_LIST; do
             case " ${MATCHED:-} " in
               *" $b "*) echo ">>> ${b} 固件已收集" ;;
