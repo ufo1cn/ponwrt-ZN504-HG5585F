@@ -21,16 +21,21 @@ on:
           - both
         default: hg5585f-ct
       groups:
-        description: '发布哪些分组'
+        description: '发布哪些分组（kmods=固件流程产出的 kmod apk）'
         type: choice
         options:
           - all
           - incremental
           - legacy
           - extra
+          - kmods
         default: all
+      fw_labels:
+        description: 'kmods 分组取哪几条固件入口：all / usb-wifi,usb,plain 逗号组合'
+        type: string
+        default: 'all'
       source_runs:
-        description: '指定源 run（格式 incremental=30,legacy=11,extra=12；留空=各取最近一次成功）'
+        description: '指定源 run（格式 incremental=30,legacy=11,extra=12,kmods=15；留空=各取最近一次成功）'
         type: string
         default: ''
       kver:
@@ -73,6 +78,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEV: ${{ inputs.device }}
           GROUPS: ${{ inputs.groups }}
+          FW_LABELS: ${{ inputs.fw_labels }}
           RUNS: ${{ inputs.source_runs }}
         run: |
           set -euo pipefail
@@ -82,6 +88,7 @@ jobs:
           REPO = os.environ['SRC_REPO']
           dev_in = os.environ['DEV']
           groups_in = os.environ['GROUPS']
+          labels_in = (os.environ.get('FW_LABELS') or 'all').strip()
           runs_in = os.environ.get('RUNS', '').strip()
 
           DEVICES = ['hg5585f-ct', 'hg5382a'] if dev_in == 'both' else [dev_in]
@@ -90,7 +97,15 @@ jobs:
               'legacy': ('build-packages-legacy.yml', 'PonWrt-legacy-packages-'),
               'extra': ('build-packages-extra.yml', 'PonWrt-extra-packages-'),
           }
-          groups = list(MAP) if groups_in == 'all' else [groups_in]
+          # kmods 不来自包工作流，而是固件流程（fw-build.yml）里同一次构建产出的 kmod apk，
+          # 产物名 PonWrt-firmware-<label>-r<run>，apk 在 artifact 的 kmods/ 目录下。
+          FW_LABEL_MAP = {
+              'usb-wifi': ('fw-usb-wifi.yml', 'fiberhome_hg5585f-ct'),
+              'usb': ('fw-usb.yml', 'nokia_xg-040g-md-ubi'),
+              'plain': ('fw-plain.yml', 'fiberhome_hg5382a'),
+          }
+          pkg_groups = list(MAP)
+          groups = pkg_groups + ['kmods'] if groups_in == 'all' else [groups_in]
 
           pinned = {}
           for kv in runs_in.replace(';', ',').split(','):
@@ -109,25 +124,45 @@ jobs:
               raw = gh('api', f'repos/{REPO}/actions/runs/{run_id}/artifacts?per_page=100')
               return [a['name'] for a in json.loads(raw)['artifacts']]
 
+          def pick_run(wf, want, pinned_id=None):
+              if pinned_id:
+                  names = artifacts(pinned_id)
+                  hit = [n for n in names if n.startswith(want)]
+                  return pinned_id, hit
+              raw = gh('api', f'repos/{REPO}/actions/workflows/{wf}/runs?per_page=30&status=success')
+              for r in json.loads(raw)['workflow_runs']:
+                  names = artifacts(r['id'])
+                  hit = [n for n in names if n.startswith(want)]
+                  if hit:
+                      return r['id'], hit
+              return None, []
+
           plan = []
           for g in groups:
+              if g == 'kmods':
+                  if labels_in in ('', 'all'):
+                      labels = list(FW_LABEL_MAP)
+                  else:
+                      labels = [x.strip() for x in labels_in.split(',') if x.strip()]
+                  for label in labels:
+                      if label not in FW_LABEL_MAP:
+                          print(f'::error::未知固件入口 label：{label}', file=sys.stderr)
+                          sys.exit(1)
+                      wf, dev = FW_LABEL_MAP[label]
+                      want = f'PonWrt-firmware-{label}-r'
+                      run_id, hit = pick_run(wf, want, pinned.get('kmods') or pinned.get(label))
+                      if not hit:
+                          print(f'::error::kmods/{label}：找不到带 {want}* 产物的成功固件 run', file=sys.stderr)
+                          sys.exit(1)
+                      plan.append({'group': 'kmods', 'device': label, 'fw_device': dev,
+                                   'run_id': run_id, 'artifact': hit[0], 'workflow': wf})
+                      print(f'>>> kmods/{label}（{dev}）: run={run_id} artifact={hit[0]}', file=sys.stderr)
+                  continue
+
               wf, prefix = MAP[g]
               for dev in DEVICES:
                   want = f'{prefix}{dev}-'
-                  hit = []
-                  if g in pinned:
-                      run_id = pinned[g]
-                      names = artifacts(run_id)
-                      hit = [n for n in names if n.startswith(want)]
-                  else:
-                      run_id = None
-                      raw = gh('api', f'repos/{REPO}/actions/workflows/{wf}/runs?per_page=30&status=success')
-                      for r in json.loads(raw)['workflow_runs']:
-                          names = artifacts(r['id'])
-                          hit = [n for n in names if n.startswith(want)]
-                          if hit:
-                              run_id = r['id']
-                              break
+                  run_id, hit = pick_run(wf, want, pinned.get(g))
                   if not hit:
                       print(f'::error::{g}/{dev}：找不到带 {want}* 产物的成功 run（指定 run 里也没有）', file=sys.stderr)
                       sys.exit(1)
@@ -181,26 +216,36 @@ jobs:
           shopt -s nullglob
           APKBIN=""
           bad=0
+          allapks=()
           for d in in/*/; do
             gd=$(basename "$d")
-            apks=( "$d"output/*.apk )
-            echo ">>> $gd：${#apks[@]} 个 apk"
-            if [ -f "$d"output/public-key.pem ]; then
-              got=$(sha256sum "$d"output/public-key.pem | cut -d' ' -f1)
+            apks=( "$d"output/*.apk "$d"kmods/*.apk )
+            allapks+=("${apks[@]}")
+            echo ">>> $gd：${#apks[@]} 个 apk（output 与 kmods 各取一遍）"
+            pem=""
+            for cand in "$d"output/public-key.pem "$d"kmods/public-key.pem; do
+              [ -f "$cand" ] && { pem="$cand"; break; }
+            done
+            if [ -n "$pem" ]; then
+              got=$(sha256sum "$pem" | cut -d' ' -f1)
               if [ "$got" != "$FIXED_PUB_SHA256" ]; then
-                echo "::error::$gd 的 public-key.pem 指纹 $got 与固定指纹不一致（这批包不是用现在的私钥签的）"
+                echo "::error::$gd 的 public-key.pem（$pem）指纹 $got 与固定指纹不一致（这批包不是用现在的私钥签的）"
                 bad=1
               else
                 echo ">>> $gd 公钥指纹一致"
               fi
             else
-              echo "::error::$gd 产物里没有 public-key.pem，无法核对签名密钥"
+              echo "::error::$gd 产物里没有 public-key.pem（output/ 与 kmods/ 都没有），无法核对签名密钥"
               bad=1
             fi
             if [ -z "$APKBIN" ] && [ -x "$d"pubtool/apk ]; then
               APKBIN="${d}pubtool/apk"
             fi
           done
+          if [ "${#allapks[@]}" -eq 0 ]; then
+            echo "::error::没有任何 apk 可发布（output/ 与 kmods/ 均为空）"
+            exit 1
+          fi
           if [ -z "$APKBIN" ]; then
             echo "::error::产物里没有 host apk（pubtool/apk）：请用改造后的工作流重跑一次包构建，再跑本工作流"
             exit 1
@@ -210,12 +255,12 @@ jobs:
           mkdir -p keys && cp -f public-key.pem keys/
           # 强制验签：不传 --allow-untrusted，keys-dir 里只有固定公钥
           if ! "$APKBIN" mkndx --root "$PWD/keys" --keys-dir "$PWD/keys" --output /tmp/verify.adb \
-                $(ls in/*/output/*.apk) 2>/tmp/verify.err; then
+                "${allapks[@]}" 2>/tmp/verify.err; then
             echo "::error::签名校验失败：以下包不是用固定私钥签的（ADB 包无法事后重签，只能重编）"
             sed -n '1,200p' /tmp/verify.err
             exit 1
           fi
-          echo ">>> 全部 apk 通过固定公钥验签（$(ls in/*/output/*.apk | wc -l) 个）"
+          echo ">>> 全部 apk 通过固定公钥验签（${#allapks[@]} 个）"
           if [ "$bad" != "0" ]; then
             echo "::error::公钥核对未通过，停止发布"
             exit 1
@@ -256,7 +301,8 @@ jobs:
             echo common
           }
           rm -rf stage && mkdir -p stage
-          for f in in/*/output/*.apk; do
+          for f in in/*/output/*.apk in/*/kmods/*.apk; do
+            [ -f "$f" ] || continue
             feat=$(feature_of "$f")
             mkdir -p "stage/$feat"
             cp -f "$f" "stage/$feat/"
