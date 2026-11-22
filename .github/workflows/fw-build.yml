@@ -160,42 +160,18 @@ jobs:
             sed -i '/^CONFIG_DEVEL=/d; /^CONFIG_CCACHE=/d' .config
             printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\n' >> .config
           fi
-          make defconfig
-
-          # ------------------------------------------------------------------
-          # 机型锁定（defconfig 之后，且之后不再 defconfig）
-          # an7581.config 默认选中多个机型；这里先清空全部
-          # CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_*，只写入本次要编的机型，
-          # 避免多 profile 重复建 rootfs，同时保证 HG5382A 一定在列。
-          # ------------------------------------------------------------------
-          DEVICES="${{ inputs.device_list }}"
-          [ -n "${DEVICES// /}" ] || { echo "::error::device_list 为空"; exit 1; }
-
-          echo ">>> 目标机型: $DEVICES"
-          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
-          sed -i '/^# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.* is not set/d' .config
-          for d in $DEVICES; do
-            printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_%s=y\n' "$d" >> .config
-          done
-          for d in $DEVICES; do
-            grep -q "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${d}=y" .config \
-              || { echo "::error::机型符号未落地: CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${d}=y"; exit 1; }
-          done
-          echo ">>> 机型锁定完成（未再执行 defconfig）"
 
           # ------------------------------------------------------------------
           # 机型能力 -> 配置片段（configs/features/<能力>.config）
           #
-          #   能力表 = configs/device-features.txt（<机型>|<能力...>），与本工作流
-          #   后面写 apk 仓库源用的是同一张表。每个能力对应一份片段，片段每行要么
-          #   `CONFIG_X=y|m`，要么 `# CONFIG_X is not set`；
-          #   应用方式：把该符号的旧行删干净，再按片段写回 .config（不再 defconfig，
-          #   否则刚锁定的机型行会被重算掉）。
-          #
-          #   当前：HG5585F-CT = usb wifi（USB 栈 + 内置 MT7916 无线）
-          #         HG5382A    = 无（镜像里不放无线 / USB 软件）
-          #         XG-040G-MD = usb（有 USB、无内置无线；USB 网卡驱动也在 usb 片段）
-          #   新机型只在能力表加一行，这段逻辑不用动。
+          #   能力表 = configs/device-features.txt（<机型>|<能力...>）。
+          #   【顺序很重要】片段必须在 make defconfig 之前写进 .config：
+          #   defconfig 是唯一一次让 kconfig 解析 DEPENDS 的机会，隐藏包
+          #   （HIDDEN:=1）、条件包（@USE_XXX）以及 +kmod-* 提供者只有在这一步
+          #   才会被真正选中并归属到某个包。片段放在 defconfig 之后写，符号会
+          #   被 kconfig 判为“依赖不满足”而丢弃，模块仍被内核 KCONFIG 编出来，
+          #   但没有包拥有它 → 打包阶段报 missing dependencies（kmod-bluetooth
+          #   缺 rfkill.ko 就是这么来的）。
           # ------------------------------------------------------------------
           features_of() {
             local dev line block out
@@ -206,6 +182,8 @@ jobs:
             if echo "$block" | grep -qiE 'kmod-usb'; then out="$out usb"; fi
             printf '%s' "$out"
           }
+          DEVICES="${{ inputs.device_list }}"
+          [ -n "${DEVICES// /}" ] || { echo "::error::device_list 为空"; exit 1; }
           CAPS=""
           for dev in $DEVICES; do
             for c in $(features_of "$dev"); do
@@ -223,7 +201,7 @@ jobs:
                echo ">>> 本机型没有内置无线：追加 no-wifi 片段（关掉 release.config 的 mt7915e/mt7916）" ;;
           esac
 
-          n_frag=0; missing_syms=""
+          n_frag=0
           for c in $APPLY_CAPS; do
             f="configs/features/${c}.config"
             if [ ! -f "$f" ]; then
@@ -239,15 +217,7 @@ jobs:
                   sym=${line%%=*}; val=${line#*=} ;;
                 *) continue ;;
               esac
-              # 符号必须真实存在于本次源码树（defconfig 之后每个可用包符号都在
-              # .config 里），不存在只告警——写进一个不存在的包名会静默不编
-              grep -qE "^(# )?${sym}(=| is not set)" .config || missing_syms="$missing_syms ${sym}"
               sed -i "/^${sym}=/d; /^# ${sym} is not set/d" .config
-              # bake_usb=true 时把片段里的 =m 全部改写成 =y（= 旧 USB 固件 USB_PKGS 的做法：
-              # 驱动直接烘进镜像，插上即用；代价是镜像变大）
-              if [ "$val" = "m" ] && [ "${{ inputs.bake_usb }}" = "true" ]; then
-                val="y"
-              fi
               if [ "$val" = "notset" ]; then
                 printf '# %s is not set\n' "$sym" >> .config
               else
@@ -256,12 +226,12 @@ jobs:
               n_frag=$((n_frag+1))
             done < "$f"
           done
-          echo ">>> 能力片段共应用 $n_frag 个符号"
+          echo ">>> 能力片段共应用 $n_frag 个符号（defconfig 前写入）"
 
           # ------------------------------------------------------------------
           # 仓库专用 kmod 片段：这些 kmod 编成 apk 进软件仓库，不进镜像（=m）。
-          # 与能力片段分开处理，是因为 bake_usb 会把能力片段里的 =m 改写成 =y，
-          # 而这里必须保持 =m，否则模块同时又烘进镜像又发 apk，装的时候会撞文件。
+          # 同样在 defconfig 之前写入，让 kconfig 把它们的依赖（含隐藏提供者）
+          # 一并解析；已按 =y 烘进镜像的符号不再降级成 =m。
           # 对应清单：configs/features/kmod-repo.config
           # ------------------------------------------------------------------
           REPO_FRAG="configs/features/kmod-repo.config"
@@ -276,9 +246,6 @@ jobs:
                   sym=${line%%=*}; val=${line#*=} ;;
                 *) continue ;;
               esac
-              # 已经按 =y 烘进镜像的符号（bake_usb 把 usb 片段里的 =m 改成了 =y）
-              # 不再被仓库片段降级成 =m：否则同一个模块既在镜像里又要靠 apk 补，
-              # 装的时候撞同名文件，bake 落地校验也会红。
               if grep -q "^${sym}=y$" .config; then
                 echo ">>> ${sym} 已烘进镜像（=y），跳过 apk 片段"
                 n_repo_skip=$((n_repo_skip+1))
@@ -294,19 +261,72 @@ jobs:
             done < "$REPO_FRAG"
             echo ">>> kmod 仓库片段应用 $n_repo 个符号（=m：只编 apk，不进镜像），${n_repo_skip:-0} 个已烘进镜像跳过"
           fi
+
+          # kconfig 解析：只此一次，之后不再 defconfig
+          make defconfig
+
+          # ------------------------------------------------------------------
+          # 机型锁定（defconfig 之后）：an7581.config 默认选中多个机型，
+          # 这里清空全部 CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_* 再只写本次机型，
+          # 避免多 profile 重复建 rootfs，同时保证 HG5382A 一定在列。
+          # ------------------------------------------------------------------
+          echo ">>> 目标机型: $DEVICES"
+          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+          sed -i '/^# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.* is not set/d' .config
+          for d in $DEVICES; do
+            printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_%s=y\n' "$d" >> .config
+          done
+          for d in $DEVICES; do
+            grep -q "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${d}=y" .config \
+              || { echo "::error::机型符号未落地: CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${d}=y"; exit 1; }
+          done
+          echo ">>> 机型锁定完成（之后不再 defconfig）"
+
+          # ------------------------------------------------------------------
+          # bake_usb=true：USB 驱动按 =y 烘焙进镜像（旧 USB 固件的做法，插上即用）。
+          # 只对 .config 里真实存在（kconfig 可见）的符号做改写；隐藏包/条件包
+          # （HIDDEN、@USE_XXX）无法用 CONFIG_PACKAGE_ 选择，逐个列出到日志，
+          # 它们是否进镜像由 kconfig 的依赖解析结果决定，不当成失败。
+          # ------------------------------------------------------------------
+          bake_invisible=""
+          if [ "${{ inputs.bake_usb }}" = "true" ] && has_cap usb; then
+            echo ">>> bake_usb=true：USB 驱动按 =y 烘焙进镜像"
+            for s in $(grep -E '^CONFIG_PACKAGE_' configs/features/usb.config | cut -d= -f1); do
+              if grep -qE "^(# )?${s}(=| is not set)" .config; then
+                sed -i "/^${s}=/d; /^# ${s} is not set/d" .config
+                printf '%s=y\n' "$s" >> .config
+              else
+                bake_invisible="$bake_invisible ${s}"
+              fi
+            done
+            for s in $(grep -E '^CONFIG_PACKAGE_' configs/features/usb.config | cut -d= -f1); do
+              case " $bake_invisible " in *" $s "*) continue ;; esac
+              grep -q "^${s}=y$" .config || { echo "::error::bake_usb=true 但 ${s} 不是 =y"; exit 1; }
+            done
+            echo ">>> bake_usb 落地校验通过（不可选符号 ${bake_invisible:-（无）}）"
+          fi
+
           # 固件更新 app 必须真的被选中，否则镜像里没有 LuCI 入口（静默变哑巴）
           grep -q '^CONFIG_PACKAGE_luci-app-ponwrt-update=y' .config \
             || { echo "::error::.config 里没有 CONFIG_PACKAGE_luci-app-ponwrt-update=y（仓库里的 app 没被编进固件）"; exit 1; }
           echo ">>> 固件更新 app 已在 .config 里选中"
-          [ -z "$missing_syms" ] || echo "::warning::以下符号在当前源码树里不存在（照写但不会被编）:${missing_syms}"
 
-          if [ "${{ inputs.bake_usb }}" = "true" ] && has_cap usb; then
-            echo ">>> bake_usb=true：USB 驱动按 =y 烘焙进镜像"
-            for s in $(grep '^CONFIG_PACKAGE_' configs/features/usb.config | cut -d= -f1); do
-              grep -q "^${s}=y$" .config || { echo "::error::bake_usb=true 但 ${s} 不是 =y"; exit 1; }
-            done
-            echo ">>> bake_usb 落地校验通过"
-          fi
+          # defconfig 之后仍不存在的片段符号：只告警（kconfig 判定依赖不满足，
+          # 这类符号不能靠 CONFIG_PACKAGE_ 强行选中），逐个列出便于下一轮核对
+          missing_syms=""
+          for f in $(for c in $APPLY_CAPS; do echo "configs/features/${c}.config"; done) "$REPO_FRAG"; do
+            [ -f "$f" ] || continue
+            while IFS= read -r line; do
+              case "$line" in
+                '# CONFIG_PACKAGE_'*' is not set') sym=${line#\# }; sym=${sym%% is not set*} ;;
+                'CONFIG_PACKAGE_'*=*) sym=${line%%=*} ;;
+                *) continue ;;
+              esac
+              grep -qE "^(# )?${sym}(=| is not set)" .config || missing_syms="$missing_syms ${sym}"
+            done < "$f"
+          done
+          [ -z "$missing_syms" ] || echo "::warning::以下符号 kconfig 判定不可选（不会进 .config）:${missing_syms}"
+
           if has_cap usb; then
             for s in kmod-usb-core kmod-usb-net; do
               grep -q "^CONFIG_PACKAGE_${s}=[my]" .config \
@@ -421,6 +441,19 @@ jobs:
         run: |
           [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
           make -j"$(nproc)" || make -j1 V=s
+
+      - name: Ensure firmware images are built
+        if: success()
+        run: |
+          set -uo pipefail
+          ls -l bin/targets/airoha/an7581/ 2>/dev/null | head -n 40 || true
+          n=$(find bin/targets/airoha/an7581 -maxdepth 1 -name '*sysupgrade*.itb' 2>/dev/null | wc -l)
+          echo ">>> sysupgrade itb 数量: $n"
+          if [ "$n" -eq 0 ]; then
+            echo ">>> world 没有产出镜像，显式构建 image 目录"
+            make -C target/linux/airoha/image compile install V=s 2>&1 | tail -n 80
+            find bin/targets/airoha/an7581 -maxdepth 1 -name '*sysupgrade*.itb' 2>/dev/null | head -n 20
+          fi
 
       - name: Collect repo apks (kmod + iptv 上层)
         if: success()
