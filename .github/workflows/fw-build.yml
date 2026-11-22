@@ -267,6 +267,7 @@ jobs:
           REPO_FRAG="configs/features/kmod-repo.config"
           if [ -f "$REPO_FRAG" ]; then
             n_repo=0
+            n_repo_skip=0
             while IFS= read -r line; do
               case "$line" in
                 '# CONFIG_PACKAGE_'*' is not set')
@@ -275,6 +276,14 @@ jobs:
                   sym=${line%%=*}; val=${line#*=} ;;
                 *) continue ;;
               esac
+              # 已经按 =y 烘进镜像的符号（bake_usb 把 usb 片段里的 =m 改成了 =y）
+              # 不再被仓库片段降级成 =m：否则同一个模块既在镜像里又要靠 apk 补，
+              # 装的时候撞同名文件，bake 落地校验也会红。
+              if grep -q "^${sym}=y$" .config; then
+                echo ">>> ${sym} 已烘进镜像（=y），跳过 apk 片段"
+                n_repo_skip=$((n_repo_skip+1))
+                continue
+              fi
               sed -i "/^${sym}=/d; /^# ${sym} is not set/d" .config
               if [ "$val" = "notset" ]; then
                 printf '# %s is not set\n' "$sym" >> .config
@@ -283,7 +292,7 @@ jobs:
               fi
               n_repo=$((n_repo+1))
             done < "$REPO_FRAG"
-            echo ">>> kmod 仓库片段应用 $n_repo 个符号（=m：只编 apk，不进镜像）"
+            echo ">>> kmod 仓库片段应用 $n_repo 个符号（=m：只编 apk，不进镜像），${n_repo_skip:-0} 个已烘进镜像跳过"
           fi
           # 固件更新 app 必须真的被选中，否则镜像里没有 LuCI 入口（静默变哑巴）
           grep -q '^CONFIG_PACKAGE_luci-app-ponwrt-update=y' .config \
