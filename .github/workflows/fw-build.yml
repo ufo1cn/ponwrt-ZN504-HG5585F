@@ -613,6 +613,9 @@ jobs:
           set -euo pipefail
           mkdir -p output
           kver=$(cat build_dir/target-*/linux-*/include/config/kernel.release 2>/dev/null | head -n1 || true)
+          # kernel.release 在部分构建树里为空/不存在时退回 Configure 步骤预算出的 KVER（已写入 GITHUB_ENV）
+          [ -n "${kver:-}" ] || kver="${KVER:-}"
+          [ -n "${kver:-}" ] || echo "::warning::拿不到内核版本，build-info.txt 记为 unknown"
           ko=$(find build_dir/target-*/linux-*/ -name '*.ko' -print 2>/dev/null | head -n1 || true)
           ver=""
           [ -n "$ko" ] && ver=$(modinfo -F vermagic "$ko" 2>/dev/null | head -n1 || true)
