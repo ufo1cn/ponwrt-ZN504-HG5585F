@@ -743,11 +743,32 @@ jobs:
           fi
           tag="pkgs-legacy-${{ inputs.device }}-r${{ github.run_number }}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${files[@]}" --clobber
+            echo ">>> 复用已有预发布 $tag"
           else
-            gh release create "$tag" "${files[@]}" \
+            gh release create "$tag" \
               --prerelease \
               --title "apk $tag" \
               --notes "device=${{ inputs.device }} run=${{ github.run_number }} commit=${{ github.sha }}；同私钥签名，公钥 public-key.pem(.sha256) 随包发布。"
           fi
+          # 一次性丢几百个资产会撞 GitHub 二级限流（HTTP 403 secondary rate limit），
+          # 改成一个一个传、失败退避重试；仍失败的记账后统一报错（重跑会 --clobber 补齐）。
+          fail=0
+          for f in "${files[@]}"; do
+            ok=0
+            for i in 1 2 3 4 5; do
+              if gh release upload "$tag" "$f" --clobber; then ok=1; break; fi
+              echo "::warning::上传 $f 第 $i 次失败，退避 $((i*10))s 后重试"
+              sleep $((i*10))
+            done
+            if [ "$ok" -eq 0 ]; then
+              echo "::warning::上传最终失败：$f"
+              fail=1
+            fi
+            sleep 1
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::有资产没传上去（多为 GitHub 二级限流；重跑本工作流会 --clobber 补齐）"
+            exit 1
+          fi
+          echo ">>> 已发布 $tag：${#files[@]} 个资产"
 
