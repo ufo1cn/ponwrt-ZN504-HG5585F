@@ -372,6 +372,91 @@ jobs:
           }
 
           fail=0; summary=""; skipped=""
+          # 依赖闭包：manifest 里各包的传递依赖统一拉成 =m。原因（legacy #10 实测）：
+          # 只补选主包 `CONFIG_PACKAGE_<apk>=m` 不会带出依赖，主包打包时报
+          #   Package ffmpeg is missing dependencies for the following libraries:
+          #   libavcodec.so.63 … libz.so.1
+          # 而原本 =y 的库只进镜像、不出 apk，同样会被判成「没有提供者」，所以这里
+          # 连 =y 也降成 =m（本流程只产 apk，不出镜像，降级不影响任何镜像）。
+          if [ -f tmp/.packageinfo ]; then
+            python3 - "$TMP" > /tmp/closure.txt <<'PY'
+          import re, sys
+
+          entries, cur = {}, None
+          for line in open('tmp/.packageinfo', encoding='utf-8', errors='replace'):
+              line = line.rstrip('\n')
+              if line.startswith('Package: '):
+                  cur = line.split(': ', 1)[1].strip()
+                  entries[cur] = []
+              elif line.startswith('Depends: ') and cur:
+                  raw = line.split(': ', 1)[1]
+                  deps = []
+                  for tok in re.split(r'[,\s]+', raw):
+                      tok = tok.strip().lstrip('+')
+                      if not tok:
+                          continue
+                      tok = tok.split(':')[-1]
+                      tok = re.sub(r'\(.*?\)', '', tok).strip()
+                      if tok and not tok.startswith('PACKAGE_'):
+                          deps.append(tok)
+                  entries[cur] = deps
+              elif not line.strip():
+                  cur = None
+
+          targets = []
+          for line in open(sys.argv[1], encoding='utf-8'):
+              line = line.strip()
+              if not line or line.startswith('#'):
+                  continue
+              parts = line.split('|')
+              if len(parts) >= 2 and parts[1].strip():
+                  targets.append(parts[1].strip())
+
+          seen, stack = set(), list(targets)
+          while stack:
+              n = stack.pop()
+              if n in seen:
+                  continue
+              seen.add(n)
+              for d in entries.get(n, []):
+                  if d.startswith('kmod-') or d in ('kernel', 'libc', 'base-files', 'busybox', 'procd'):
+                      continue
+                  if d not in seen:
+                      stack.append(d)
+          for n in sorted(seen):
+              print(n)
+          PY
+            added=0
+            while read -r d; do
+              [ -n "$d" ] || continue
+              if grep -q "^CONFIG_PACKAGE_${d}=" .config; then
+                if ! grep -q "^CONFIG_PACKAGE_${d}=m" .config; then
+                  sed -i "s/^CONFIG_PACKAGE_${d}=.*/CONFIG_PACKAGE_${d}=m/" .config
+                  added=$((added+1))
+                fi
+              elif [ -f tmp/.config-package.in ] && grep -qx "config PACKAGE_${d}" tmp/.config-package.in; then
+                printf 'CONFIG_PACKAGE_%s=m\n' "$d" >> .config
+                added=$((added+1))
+              fi
+            done < /tmp/closure.txt
+            echo ">>> 依赖闭包：$(wc -l < /tmp/closure.txt) 个包，落成 =m 的 ${added} 个"
+          else
+            echo "::warning::没有 tmp/.packageinfo，跳过依赖闭包（只能逐包补选）"
+          fi
+          echo ">>> 用 kconfig 解析 select 依赖（oldconfig，不 defconfig，机型行必须保留）"
+          set +o pipefail
+          yes "" | make oldconfig > build_log/oldconfig-deps.log 2>&1
+          rc=$?
+          set -o pipefail
+          if [ "$rc" != "0" ]; then
+            echo "::error::make oldconfig 失败，日志 build_log/oldconfig-deps.log"
+            tail -n 40 build_log/oldconfig-deps.log || true
+            exit 1
+          fi
+          grep -q "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_" .config \
+            || { echo "::error::oldconfig 之后机型行丢了"; exit 1; }
+          echo ">>> =m 符号数：$(grep -c '^CONFIG_PACKAGE_.*=m' .config || true)"
+          touch build_log/.loopstart
           while IFS='|' read -r path apk required; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
@@ -395,12 +480,25 @@ jobs:
               continue
             fi
 
-            # 包没在 .config 里选中（=m）时，OpenWrt 只编源码、不产出 apk —— legacy #8
-            # 的 avahi-daemon / frpc / ffmpeg 都是「符号未落地」→「无 apk 产出」。
-            # 这里补选成 =m（追加即可；不能再 defconfig，否则机型行会被重算掉）。
+            # 闭包之外仍可能漏选（符号不在 .packageinfo 里，或清单中途加包）：
+            # 补一行符号后再跑一次 oldconfig，让 select 把依赖也拉成 =m。
             if ! grep -q "^CONFIG_PACKAGE_${apk}=" .config; then
               printf 'CONFIG_PACKAGE_%s=m\n' "$apk" >> .config
               echo ">>> 补选 CONFIG_PACKAGE_${apk}=m（原未选中；不补只会编源码、不产出 apk）"
+              set +o pipefail
+              yes "" | make oldconfig > "build_log/oldconfig-${apk}.log" 2>&1
+              orc=$?
+              set -o pipefail
+              if [ "$orc" != "0" ]; then
+                echo "::error::make oldconfig 失败（解析 ${apk} 依赖），日志 build_log/oldconfig-${apk}.log"
+                summary="${summary}\nFAIL   $apk（oldconfig 失败）"; fail=1
+                continue
+              fi
+              if ! grep -q "^CONFIG_PACKAGE_${apk}=" .config; then
+                echo "::error::${apk} 的 CONFIG 符号不存在（oldconfig 已丢弃），检查包名与 Makefile 的 define Package/ 是否一致"
+                summary="${summary}\nFAIL   $apk（符号不存在）"; fail=1
+                continue
+              fi
             fi
 
             echo ">>> 编译 $apk ($path)"
@@ -420,6 +518,17 @@ jobs:
               summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
             fi
           done < "$manifest"
+
+          # 依赖包（libavcodec / libz / avahi 库 …）也要进产物，否则主包 apk 在设备上装不上。
+          # 用循环前的时间戳界定「本次新编出来的 apk」，全部收进 output（同名覆盖去重）。
+          if [ -f build_log/.loopstart ]; then
+            n=0
+            while read -r f; do
+              [ -n "$f" ] || continue
+              if cp -f "$f" output/ 2>/dev/null; then n=$((n+1)); fi
+            done < <(find bin/packages bin/targets -type f -name '*.apk' -newer build_log/.loopstart 2>/dev/null)
+            echo ">>> 连同依赖包一起收集：本次新增 apk ${n} 个（含清单内主包）"
+          fi
 
           {
             echo "# 旧仓遗留包逐包结果（${{ inputs.device }} / only=$only）"
