@@ -751,6 +751,56 @@ jobs:
           done
           echo ">>> 产物归属机型:${matched:-（无）}"
           echo "MATCHED=$matched" >> "$GITHUB_ENV"
+          # 逐机型写 manifest：fw-publish 与 meta/fw 索引都按「文件名含 manifest 且含机型名」查找。
+          # 缺了它索引里就没有 manifest 字段、sysupgrade.size 也只能是空。
+          python3 - <<'PY'
+          import hashlib, json, os
+
+          devices = os.environ.get('DEVICE_LIST', '').split()
+          info = {}
+          if os.path.isfile('output/build-info.txt'):
+              for line in open('output/build-info.txt', encoding='utf-8'):
+                  if '=' in line:
+                      k, v = line.strip().split('=', 1)
+                      info[k] = v
+          itbs = [f for f in os.listdir('output') if f.endswith('.itb')]
+
+          def sha256(p):
+              h = hashlib.sha256()
+              with open(p, 'rb') as fh:
+                  for b in iter(lambda: fh.read(1 << 20), b''):
+                      h.update(b)
+              return h.hexdigest()
+
+          for dev in devices:
+              cand = [f for f in itbs if dev in f and 'sysupgrade' in f and 'sfp' not in f]
+              if not cand:
+                  print('WARN: %s 没有 sysupgrade itb，跳过 manifest' % dev)
+                  continue
+              cand.sort(key=lambda f: (len(f), f))
+              up = cand[0]
+              p = os.path.join('output', up)
+              man = {
+                  'schema': 1,
+                  'device': dev,
+                  'label': info.get('feature_class', ''),
+                  'run': int(info.get('run', '0') or 0),
+                  'commit': info.get('ponwrt_commit', ''),
+                  'kernel_version': info.get('kernel_version', 'unknown'),
+                  'kmod_vermagic': info.get('kmod_vermagic', 'unknown'),
+                  'built_at': info.get('built_at', ''),
+                  'sysupgrade': {
+                      'name': up,
+                      'sha256': sha256(p),
+                      'size': os.path.getsize(p),
+                  },
+                  'kmods_release': 'kmods-%s-r%s' % (info.get('feature_class', ''), info.get('run', '0')),
+              }
+              path = os.path.join('output', 'manifest-%s.json' % dev)
+              with open(path, 'w', encoding='utf-8') as fh:
+                  fh.write(json.dumps(man, ensure_ascii=False, indent=2) + '\n')
+              print('>>> manifest -> %s（%s, %s 字节）' % (path, up, man['sysupgrade']['size']))
+          PY
           cd output
           for file in $(ls * 2>/dev/null); do
             [ -f "$file" ] && sha256sum "$file" > "${file}.sha256"
@@ -906,7 +956,12 @@ jobs:
                   'commit': commit,
                   'kernel_version': kver,
                   'built_at': btime,
-                  'sysupgrade': {'name': up, 'sha256': sha, 'url': url},
+                  'sysupgrade': {
+                      'name': up,
+                      'sha256': sha,
+                      'size': os.path.getsize(os.path.join(outdir, up)),
+                      'url': url,
+                  },
               }
               if man:
                   d['manifest'] = {'name': man, 'url': 'https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases/download/%s/%s' % (tag, man)}
