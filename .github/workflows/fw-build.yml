@@ -59,6 +59,11 @@ concurrency:
 env:
   CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
   CCACHE_MAXSIZE: 5G
+  # 机型列表统一在这里注入：后面「Organize output files / Verify requested firmware
+  # exists / Publish firmware update index」三段都读 $DEVICE_LIST。之前缺这个定义，
+  # 前两段在 for 循环里遇到空值只是空转（不报错），导致 output/ 一个 itb 都没收集、
+  # 索引段则在 set -u 下直接 unbound variable 失败。定义放 job env 是唯一安全位置。
+  DEVICE_LIST: ${{ inputs.device_list }}
 
 jobs:
   build:
@@ -726,6 +731,7 @@ jobs:
           # 所以取「匹配上的最长 board 名」作为归属，避免 SFP 变体被黑名单误删、
           # 也避免一个文件被算给两个机型。
           matched=""
+          [ -n "${DEVICE_LIST:-}" ] || { echo "::error::DEVICE_LIST 为空，无法判断产物归属"; exit 1; }
           for f in bin/targets/airoha/an7581/*; do
             [ -f "$f" ] || continue
             fb=$(basename "$f")
@@ -756,6 +762,7 @@ jobs:
       - name: Verify requested firmware exists
         run: |
           fail=0
+          [ -n "${DEVICE_LIST:-}" ] || { echo "::error::DEVICE_LIST 为空，无法校验机型产物"; exit 1; }
           # root 是上一步的局部变量，跨步骤不保留（GitHub Actions 每步独立 shell），
           # 这里必须自己再算一次，否则 $root 为空、所有 /xxx 检查都会假报缺失。
           root=$(ls -d build_dir/target-*/root-* 2>/dev/null | head -n1 || true)
@@ -853,6 +860,7 @@ jobs:
           fi
           TAG="${{ steps.tag.outputs.release_tag }}"
           [ -n "$TAG" ] || { echo "::warning::没有 tag，跳过索引发布"; exit 0; }
+          [ -n "${DEVICE_LIST:-}" ] || { echo "::error::DEVICE_LIST 为空（job env 没注入 inputs.device_list）"; exit 1; }
           REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
           rm -rf /tmp/fwidx
           if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/fwidx 2>/dev/null; then
