@@ -111,8 +111,11 @@ jobs:
             qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
             uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
 
-      - name: Cache downloads
-        uses: actions/cache@v4
+      # dl（源码包）缓存：actions/cache@v4 的 post 保存只在 job 成功时执行，
+      # 固件这一步经常红 → dl 从来没落盘。这里只做 restore，保存放在 job 末尾单独做。
+      - name: Restore downloads cache
+        if: inputs.cache_mode != '不使用缓存'
+        uses: actions/cache/restore@v4
         with:
           path: dl
           key: ponwrt-dl-zn504-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
@@ -142,9 +145,10 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ponwrt-ccache-zn504-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+          key: ponwrt-ccache-zn504-${{ inputs.label }}-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
           restore-keys: |
-            ponwrt-ccache-zn504-${{ hashFiles('configs/*.config') }}-
+            ponwrt-ccache-zn504-${{ inputs.label }}-${{ hashFiles('configs/*.config') }}-
+            ponwrt-ccache-zn504-${{ inputs.label }}-
             ponwrt-ccache-zn504-
 
       - name: Configure for the requested device(s)
@@ -340,13 +344,17 @@ jobs:
             echo ">>> wifi 能力：内置无线已进镜像"
           else
             for s in kmod-mt7915e kmod-mt7916-firmware; do
-              echo ">>> ${s} 在 .config 中的实际行: $(grep -E "CONFIG_PACKAGE_${s}(=| is not set)" .config | tr '\n' ' ' || true)"
-              if grep -qE "^CONFIG_PACKAGE_${s}=[ym]$" .config; then
-                echo "::error::未启用 wifi 能力，但 ${s} 被选中（=y/=m）；检查 no-wifi 片段是否被 kconfig 的 select 反选"
+              line=$(grep -E "CONFIG_PACKAGE_${s}(=| is not set)" .config | head -n1 || true)
+              echo ">>> ${s}: ${line:-（.config 里没有该符号）}"
+              if echo "$line" | grep -qE "^CONFIG_PACKAGE_${s}=y$"; then
+                echo "::error::未启用 wifi 能力，但 ${s}=y（会被烘进镜像）；检查 no-wifi 片段是否被 kconfig 反选"
                 exit 1
               fi
+              case "$line" in
+                *=m) echo "::warning::${s}=m：只编成 apk、不进镜像（无 wifi 机型可以接受，但会白编一个无线驱动）" ;;
+              esac
             done
-            echo ">>> 无 wifi 能力：内置无线未选中（符号缺失或 is not set 都算关闭）"
+            echo ">>> 无 wifi 能力：内置无线没有进镜像"
           fi
 
       - name: Force base-files rebuild + inject apk repo address
@@ -660,13 +668,21 @@ jobs:
           echo "::warning::基线推送失败（不影响固件产物，下一轮巡检会补）"
 
 
+      - name: Save downloads cache
+        if: always() && inputs.cache_mode != '不使用缓存'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: dl
+          key: ponwrt-dl-zn504-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}-${{ github.run_id }}
+
       - name: Save compiler ccache
         if: always() && inputs.cache_mode != '不使用缓存'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ponwrt-ccache-zn504-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+          key: ponwrt-ccache-zn504-${{ inputs.label }}-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
 
       - name: Show compiler cache statistics
         if: always() && inputs.cache_mode != '不使用缓存'
