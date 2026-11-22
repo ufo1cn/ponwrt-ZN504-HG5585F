@@ -301,6 +301,15 @@ jobs:
           make -j"$(nproc)" target/linux/compile
           make -j"$(nproc)" target/linux/install || true
 
+      - name: List kmod requirements (kmod 由固件流程编译)
+        run: |
+          set -uo pipefail
+          python3 scripts/kmod-demand.py --root . \
+            --manifest configs/pon-legacy-packages.txt \
+            --only "${{ inputs.only }}" \
+            --extra "${{ inputs.extra_packages }}" \
+            --fwconfig configs/an7581.config configs/release.config configs/features/kmod-repo.config || true
+
       # kmod 不在这里编：统一由固件构建流程（fw-build.yml）编译并作为 apk 发布，
       # 保证 build/src/ABI 与固件同一次构建一致（清单见 configs/features/kmod-repo.config）
       - name: Build legacy packages (no silent drop)
