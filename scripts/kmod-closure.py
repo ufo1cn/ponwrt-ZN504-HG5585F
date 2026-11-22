@@ -44,8 +44,9 @@ KMOD_PREFIX = "kmod-"
 DEF_KERNEL_PKG = re.compile(r"^\s*define\s+KernelPackage/([A-Za-z0-9._+-]+)\s*$")
 DEF_ADDDEP = re.compile(r"^\s*define\s+AddDepends/([A-Za-z0-9._+-]+)\s*$")
 ENDEF = re.compile(r"^\s*endef\s*$")
-# `+kmod-x` and the conditional form `+COND:kmod-x` (e.g. +USE_RFKILL:kmod-rfkill)
-TOKEN_DEP = re.compile(r"\+\s*(?:[A-Za-z_][A-Za-z0-9_]*:)?(kmod-[A-Za-z0-9._+-]+)")
+# `+kmod-x` plus the conditional forms `+TARGET_xxx:kmod-x`, `+USE_xxx:kmod-x`
+TOKEN_DEP = re.compile(
+    r"\+\s*(?:([A-Za-z_][A-Za-z0-9_]*):)?(kmod-[A-Za-z0-9._+-]+)")
 ADD_DEP_CALL = re.compile(r"\$\(call\s+AddDepends/([A-Za-z0-9._+-]+)((?:,[^)]*)?)\)")
 VAR_REF = re.compile(r"\$[({]")
 
@@ -96,10 +97,18 @@ def split_blocks(text, header_re):
         yield name, body
 
 
-def block_deps(body):
-    """Extract +kmod-* deps and referenced AddDepends macros from a block."""
+def block_deps(body, target=None):
+    """Extract +kmod-* deps and referenced AddDepends macros from a block.
+
+    Conditional deps (`+TARGET_ath79:kmod-phy-ath79-usb`) are only kept when
+    the condition holds for our target: `TARGET_<soc>` must equal the target
+    we pass in, `USE_<opt>` is assumed on (build options default to on and a
+    kmod dep is harmless).  Anything else is returned as `conditionals` so it
+    shows up in the log instead of silently changing the closure.
+    """
     deps = set()
     macros = set()
+    conditionals = set()
     joined = " ".join(line.rstrip("\\").strip() for line in body)
     for name, args in ADD_DEP_CALL.findall(joined):
         macros.add((name, args.strip().lstrip(",").strip()))
@@ -108,12 +117,24 @@ def block_deps(body):
     for seg in joined.split(";"):
         if "DEPENDS" not in seg:
             continue
-        for tok in TOKEN_DEP.findall(seg):
+        for cond, tok in TOKEN_DEP.findall(seg):
             # skip `+kmod-nls-$(cp)`-style variable refs and truncated names
             if VAR_REF.search(tok) or tok.endswith(("-", "/")):
                 continue
+            if cond:
+                if cond.startswith("TARGET_"):
+                    if target and cond == "TARGET_" + target:
+                        deps.add(tok)
+                    else:
+                        conditionals.add("%s:%s" % (cond, tok))
+                    continue
+                if cond.startswith("USE_"):
+                    deps.add(tok)
+                    continue
+                conditionals.add("%s:%s" % (cond, tok))
+                continue
             deps.add(tok)
-    return deps, macros
+    return deps, macros, conditionals
 
 
 def block_kconfig(body):
@@ -139,12 +160,13 @@ def block_kconfig(body):
     return syms
 
 
-def load_metadata(root):
-    """Return (pkg_deps, pkg_macros, macro_deps, pkg_kconfig)."""
+def load_metadata(root, target=None):
+    """Return (pkg_deps, pkg_macros, macro_deps, pkg_kconfig, conditionals)."""
     pkg_deps = {}
     pkg_macros = {}
     macro_deps = {}
     pkg_kconfig = {}
+    conditionals = set()
     for path in iter_makefiles(root):
         text = read_text(path)
         if "KernelPackage/" in text:
@@ -152,16 +174,18 @@ def load_metadata(root):
                 # `$(eval $(call KernelPackage,fs-cifs))` produces the package
                 # `kmod-fs-cifs`, so graph nodes carry the kmod- prefix.
                 pkg = name if name.startswith(KMOD_PREFIX) else KMOD_PREFIX + name
-                deps, macros = block_deps(body)
+                deps, macros, conds = block_deps(body, target)
                 pkg_deps.setdefault(pkg, set()).update(deps)
+                conditionals.update(conds)
                 if macros:
                     pkg_macros.setdefault(pkg, set()).update(macros)
                 pkg_kconfig.setdefault(pkg, set()).update(block_kconfig(body))
         if "AddDepends/" in text:
             for name, body in split_blocks(text, DEF_ADDDEP):
-                deps, _ = block_deps(body)
+                deps, _, conds = block_deps(body, target)
                 macro_deps.setdefault(name, set()).update(deps)
-    return pkg_deps, pkg_macros, macro_deps, pkg_kconfig
+                conditionals.update(conds)
+    return pkg_deps, pkg_macros, macro_deps, pkg_kconfig, conditionals
 
 
 def macro_expand(mac, args, macro_deps, unknown):
@@ -264,6 +288,8 @@ def main():
     ap.add_argument("--fragment", required=True, help="config fragment with seed symbols")
     ap.add_argument("--out", required=True, help="output closure config path")
     ap.add_argument("--check-config", default="", help=".config used to drop non-existent symbols")
+    ap.add_argument("--target", default="",
+                    help="target soc for +TARGET_<soc>:... deps, e.g. airoha")
     ap.add_argument("--kernel-config", default="",
                     help="kernel .config; symbols missing there are reported as no-default")
     ap.add_argument("--value", default="m", choices=["m", "y"], help="value for emitted symbols")
@@ -275,7 +301,8 @@ def main():
         print("::warning::no CONFIG_PACKAGE_kmod-* seeds in %s" % args.fragment)
         return 0
 
-    pkg_deps, pkg_macros, macro_deps, pkg_kconfig = load_metadata(args.root)
+    pkg_deps, pkg_macros, macro_deps, pkg_kconfig, conditionals = load_metadata(
+        args.root, args.target or None)
     reached, unknown = closure(seeds, pkg_deps, pkg_macros, macro_deps)
     known = config_symbols(args.check_config) if args.check_config else None
     kknown = kernel_symbols(args.kernel_config) if args.kernel_config else None
@@ -311,6 +338,9 @@ def main():
               "需在 features 片段显式写值" % name)
     for name in sorted(unknown):
         print("[kmod-closure:unresolved] %s 缺少 KernelPackage 定义或 AddDepends 宏" % name)
+    for cond in sorted(conditionals):
+        print("[kmod-closure:conditional] %s 为条件依赖（目标/构建选项不匹配），未展开；"
+              "若实际报缺该 .ko 再按需显式补" % cond)
 
     # kernel KCONFIG symbols of the seeds + the pulled-in packages
     targets = sorted(set(seeds) | set(reached))
