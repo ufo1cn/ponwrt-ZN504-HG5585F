@@ -29,6 +29,14 @@ include $(INCLUDE_DIR)/package.mk
 # 显式把 sbindir 对齐到 /usr/bin，让实际安装路径与 init/配方一致。
 CONFIGURE_ARGS += --sbindir=/usr/bin
 
+# ser2net 的 --with-pam 默认值是 check：staging 里只要能探测到 security/pam_appl.h 就自动开 PAM，
+# 二进制随之链 libpam.so.0。而 staging 会被工作流缓存跨流程复用（固件流程选过 libpam，头文件残留），
+# 于是打包期直报（run 45076444397 第 17 步 build_log/ser2net.log）：
+#   Package ser2net is missing dependencies for the following libraries: libpam.so.0
+# 本包只做串口转 TCP 代理，不需要 PAM 认证：显式关掉，保证有无 pam 头都编出同一个二进制
+# （与 gensio 显式关掉 python/glib 同一处理思路；不是放宽打包依赖校验）。
+CONFIGURE_ARGS += --with-pam=no
+
 # ser2net 4.x 的配置是 yaml，configure 里 yaml.h 是硬性检查（run 44666977648 第 15 步 ser2net.log）：
 #   checking for yaml.h... no
 #   configure: error: yaml.h not found, please install libyaml dev package
