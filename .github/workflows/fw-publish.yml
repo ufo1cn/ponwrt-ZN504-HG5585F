@@ -26,6 +26,10 @@ on:
         description: 只校验产物、不建 Release 不写索引
         type: boolean
         default: false
+      force_republish:
+        description: 内容相同也强制发版（默认 false=镜像 sha256 没变就跳过）
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -127,10 +131,11 @@ jobs:
       - name: Verify firmware artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force_republish }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, json, os, sys
+          import base64, hashlib, json, os, subprocess, sys
 
           DEV_LABEL = {
               'fiberhome_hg5585f-ct': 'HG5585F-CT',
@@ -144,6 +149,19 @@ jobs:
                   for b in iter(lambda: f.read(1 << 20), b''):
                       h.update(b)
               return h.hexdigest()
+
+          def remote_sha(dev):
+              # 读 apk-repo 里已发布的索引，返回 (sysupgrade.sha256, tag)；读不到就当没有索引
+              try:
+                  out = subprocess.check_output(
+                      ['gh', 'api', 'repos/%s/contents/meta/fw/%s.json?ref=%s'
+                       % (os.environ['DST_REPO'], dev, os.environ['IDX_BRANCH']),
+                       '--jq', '.content'], text=True)
+                  d = json.loads(base64.b64decode(out.strip()).decode('utf-8'))
+                  return (d.get('sysupgrade') or {}).get('sha256'), d.get('tag', '')
+              except Exception as e:
+                  print('    读取现有索引失败，按“还没有索引”处理：%s' % e)
+                  return None, ''
 
           plan = []
           for line in open('plan.tsv', encoding='utf-8'):
@@ -232,6 +250,11 @@ jobs:
                   'manifest': os.path.basename(man) if man else None,
                   'dir': outdir,
               }
+              old_sha, old_tag = remote_sha(dev)
+              unchanged = bool(old_sha) and old_sha == real and os.environ.get('FORCE', 'false') != 'true'
+              meta['unchanged'] = unchanged
+              if unchanged:
+                  print('>>> %s：镜像 sha256 与已发布索引（%s）相同，本次不更新版本' % (dev, old_tag))
               with open(os.path.join(outdir, 'index-meta.json'), 'w', encoding='utf-8') as f:
                   json.dump(meta, f, ensure_ascii=False, indent=2)
               prepared.append(meta)
@@ -259,11 +282,17 @@ jobs:
             exit 1
           fi
           python3 - <<'PY' > rels.tsv
-          import json
+          import json, sys
           for m in json.load(open('prepared.json', encoding='utf-8')):
+              if m.get('unchanged'):
+                  print('>>> 跳过 %s：镜像内容与已发布版本相同，不新建 Release' % m['device'], file=sys.stderr)
+                  continue
               tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
               print('\t'.join([m['device'], tag, m['name'], m['dir']]))
           PY
+          if [ ! -s rels.tsv ]; then
+            echo ">>> 本次没有需要发版的机型（全部内容未变）"
+          fi
           while IFS=$'\t' read -r dev tag name dir; do
             echo ">>> 上传 $dev -> $tag"
             files=("$dir/$name" "$dir/$name.sha256")
@@ -294,6 +323,9 @@ jobs:
           idxdir = os.path.join('idx', 'meta', 'fw')
           os.makedirs(idxdir, exist_ok=True)
           for m in json.load(open('prepared.json', encoding='utf-8')):
+              if m.get('unchanged'):
+                  print('索引保留（内容未变）->', m['device'])
+                  continue
               tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
               url = 'https://github.com/%s/releases/download/%s/%s' % (dst, tag, m['name'])
               d = {
@@ -345,15 +377,16 @@ jobs:
           {
             echo "## 固件索引发布结果"
             echo
-            echo "| 机型 | 源 run | tag | 镜像 | 大小 | dry-run |"
-            echo "|---|---|---|---|---|---|"
+            echo "| 机型 | 源 run | tag | 镜像 | 大小 | 状态 | dry-run |"
+            echo "|---|---|---|---|---|---|---|"
             python3 - <<'PY'
           import json, os
           if os.path.isfile('prepared.json'):
               for m in json.load(open('prepared.json', encoding='utf-8')):
                   tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
-                  print('| %s | %s | %s | %s | %.2f MiB | %s |' % (
+                  print('| %s | %s | %s | %s | %.2f MiB | %s | %s |' % (
                       m['label'], m['run'], tag, m['name'], m['size'] / 1048576.0,
+                      '内容未变，跳过' if m.get('unchanged') else '已更新',
                       os.environ.get('DRY', '?')))
           PY
             echo
