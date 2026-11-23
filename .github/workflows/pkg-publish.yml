@@ -287,27 +287,64 @@ jobs:
           set -uo pipefail
           shopt -s nullglob
           FEAT_FILE="configs/pon-feature-packages.txt"
+          # 能力归类表是"机型能看到哪些包"的唯一依据：缺了就会把所有包塞进 common，
+          # 机型的能力目录源永远是空的（装包时报"找不到软件"），所以缺文件直接失败。
+          [ -f "$FEAT_FILE" ] || { echo "::error::缺少能力归类表 $FEAT_FILE"; exit 1; }
           feature_of() {
             local b feat pats p
             b=$(basename "$1")
-            if [ -f "$FEAT_FILE" ]; then
-              while IFS='|' read -r feat pats; do
-                case "$feat" in ''|'#'*) continue ;; esac
-                for p in $pats; do
-                  case "$b" in $p) echo "$feat"; return ;; esac
-                done
-              done < "$FEAT_FILE"
-            fi
+            while IFS='|' read -r feat pats; do
+              case "$feat" in ''|'#'*) continue ;; esac
+              for p in $pats; do
+                case "$b" in $p) echo "$feat"; return ;; esac
+              done
+            done < "$FEAT_FILE"
             echo common
           }
           rm -rf stage && mkdir -p stage
+          : > /tmp/dup-same-name.txt
+          declare -A sha_of src_of dir_of
           for f in in/*/output/*.apk in/*/kmods/*.apk; do
             [ -f "$f" ] || continue
+            b=$(basename "$f"); src=$(echo "$f" | cut -d/ -f2)
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            if [ -n "${sha_of[$b]:-}" ] && [ "${sha_of[$b]}" != "$sha" ]; then
+              echo "::warning::同名不同内容 $b：${src_of[$b]} -> $src（按 plan 顺序后到覆盖）"
+              printf '%s\t%s\t%s\n' "$b" "${src_of[$b]}" "$src" >> /tmp/dup-same-name.txt
+            fi
+            sha_of[$b]="$sha"; src_of[$b]="$src"
             feat=$(feature_of "$f")
+            [ "$feat" = "common" ] || dir_of[$b]="$feat"
             mkdir -p "stage/$feat"
             cp -f "$f" "stage/$feat/"
           done
+
+          # 反查校验（防止归类表读不到/规则写错导致"全都进 common"）：
+          #   ① 命中能力规则的包不允许落在 common；② 未命中规则的包不允许落进能力目录；
+          #   ③ 同一个包名不允许同时出现在两个能力目录（设备会从两个源拿到同名两份）。
+          fail=0
+          for d in stage/*/; do
+            feat=$(basename "$d")
+            for f in "$d"*.apk; do
+              b=$(basename "$f"); expect=$(feature_of "$f")
+              if [ "$expect" != "common" ] && [ "$feat" = "common" ]; then
+                echo "::error::$b 命中能力 $expect 却落在 common"; fail=1
+              fi
+              if [ "$expect" = "common" ] && [ "$feat" != "common" ]; then
+                echo "::error::$b 未命中任何能力规则却落在 $feat"; fail=1
+              fi
+            done
+          done
+          for b in "${!dir_of[@]}"; do
+            n=$(ls -d stage/*/"$b" 2>/dev/null | wc -l)
+            if [ "$n" -gt 1 ]; then echo "::error::$b 同时出现在多个能力目录"; fail=1; fi
+          done
           echo ">>> 分组结果：$(for d in stage/*/; do echo -n "$(basename "$d")=$(ls -1 "$d"*.apk | wc -l) "; done)"
+          if [ -s /tmp/dup-same-name.txt ]; then
+            echo ">>> 同名不同内容（按 plan 顺序后者覆盖，已记录）："
+            sed 's/^/    /' /tmp/dup-same-name.txt
+          fi
+          exit $fail
 
       - name: Publish to apk repository
         if: inputs.dry_run != true
