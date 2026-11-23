@@ -66,13 +66,14 @@ on:
         default: true
         type: boolean
       mihomo:
-        description: 'mihomo 变体（meta 与 alpha 互斥，只能选一个）'
+        description: 'mihomo 变体：meta=官方 release / alpha=滚动 commit / both=两个都编（安装期仍互斥）/ none=不编'
         required: true
         default: 'meta'
         type: choice
         options:
           - 'meta'
           - 'alpha'
+          - 'both'
           - 'none'
       scope:
         description: '编哪一组：both=B类+C类，pon-userspace=B类，extra=C类'
@@ -254,11 +255,16 @@ jobs:
           sed -i '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' .config
           printf 'CONFIG_KERNEL_DEBUG_INFO=y\n# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set\nCONFIG_KERNEL_DEBUG_INFO_BTF=y\nCONFIG_KERNEL_DEBUG_INFO_BTF_MODULES=y\nCONFIG_KERNEL_MODULE_ALLOW_BTF_MISMATCH=y\nCONFIG_KERNEL_KPROBES=y\nCONFIG_KERNEL_BPF_EVENTS=y\n' >> .config
 
-          # mihomo 变体二选一（两个都 sel 会触发 PROVIDES/CONFLICTS 冲突）
+          # mihomo 变体：两个包各自 PKG_BUILD_DIR，同一次构建里都 =m 不冲突
+          # （kconfig 侧 package-metadata.pl 的 mconf_conflicts 只写
+          #   `depends on m || (PACKAGE_<另一个> != y)`，即只禁止同时 =y；
+          #   互斥落在安装期：两者都 PROVIDES:=mihomo 且互写 CONFLICTS）
           sed -i '/^CONFIG_PACKAGE_mihomo-meta=/d;/^CONFIG_PACKAGE_mihomo-alpha=/d' .config
           case "${{ inputs.mihomo }}" in
             meta)  echo 'CONFIG_PACKAGE_mihomo-meta=m' >> .config ;;
             alpha) echo 'CONFIG_PACKAGE_mihomo-alpha=m' >> .config ;;
+            both)  echo 'CONFIG_PACKAGE_mihomo-meta=m' >> .config
+                   echo 'CONFIG_PACKAGE_mihomo-alpha=m' >> .config ;;
             none) ;;
             *) echo "::error::未知 mihomo 变体 ${{ inputs.mihomo }}"; exit 1 ;;
           esac
@@ -342,16 +348,14 @@ jobs:
               echo ",$only," | grep -q ",$apk," || continue
             fi
 
-            # mihomo 变体门控：meta 与 alpha 互斥
+            # mihomo 变体门控：both 时两个都编；meta/alpha 时只编其一
             case "$apk" in
               mihomo-meta)
-                if [ "${{ inputs.mihomo }}" != "meta" ]; then
-                  skipped="${skipped}\nSKIP   $apk（本次变体为 ${{ inputs.mihomo }}）"; continue
-                fi ;;
+                case "${{ inputs.mihomo }}" in meta|both) ;; *)
+                  skipped="${skipped}\nSKIP   $apk（本次变体为 ${{ inputs.mihomo }}）"; continue ;; esac ;;
               mihomo-alpha)
-                if [ "${{ inputs.mihomo }}" != "alpha" ]; then
-                  skipped="${skipped}\nSKIP   $apk（本次变体为 ${{ inputs.mihomo }}）"; continue
-                fi ;;
+                case "${{ inputs.mihomo }}" in alpha|both) ;; *)
+                  skipped="${skipped}\nSKIP   $apk（本次变体为 ${{ inputs.mihomo }}）"; continue ;; esac ;;
             esac
 
             # feed 内包路径可能被 feeds install 换成 package/feeds/<feed>/<dir>：
