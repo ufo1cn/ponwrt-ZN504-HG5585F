@@ -894,7 +894,26 @@ jobs:
         id: tag
         if: inputs.upload_release
         run: |
-          echo "release_tag=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          # tag 不再另取一次时钟：镜像里的 built_at 是编译开始时写进 rootfs 的，
+          # 若 tag 用发布时刻，两者必然差一个编译时长（约 3.5h）。这里让 tag 与
+          # built_at 同源，三处（镜像/build-info/meta）自然字面一致。
+          # 三个入口经常在同一分钟 dispatch（built_at 分钟位相同），必须带 label 与 run 号
+          # 才唯一，否则 action-gh-release 会把不同入口的固件并进同一个 tag。
+          T="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+          echo "release_tag=v$(date -u -d "$T" +'%Y.%m.%d-%H%M')-${{ inputs.label }}-r${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          # 真实发布时间：单独记，绝不进镜像；写进 build-info.txt 并重算它的 sha256
+          # （产物 zip 的 Build artifact 步骤在上面已跑完，那份是发布前快照，不含本行）
+          PUB=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "PUBLISHED_AT=${PUB}" >> "$GITHUB_ENV"
+          if [ -f output/build-info.txt ]; then
+            sed -i '/^published_at=/d' output/build-info.txt
+            echo "published_at=${PUB}" >> output/build-info.txt
+            ( cd output && sha256sum build-info.txt > build-info.txt.sha256 )
+            echo ">>> 发布时间 published_at=${PUB}（build-info.txt.sha256 已重算）"
+          else
+            echo "::warning::没有 output/build-info.txt，published_at 只记在 meta"
+          fi
 
       - name: Upload firmware to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -964,9 +983,11 @@ jobs:
           commit=$(git rev-parse HEAD)
           kver=$(sed -n 's/^kernel_version=//p' output/build-info.txt 2>/dev/null | head -n1)
           btime=$(sed -n 's/^built_at=//p' output/build-info.txt 2>/dev/null | head -n1)
-          python3 - "output" "$TAG" "$commit" "${kver:-unknown}" "${btime:-}" "/tmp/fwidx/meta/fw" "$DEVICE_LIST" <<'PY'
+          ptime=$(sed -n 's/^published_at=//p' output/build-info.txt 2>/dev/null | head -n1)
+          [ -n "${ptime:-}" ] || ptime="${PUBLISHED_AT:-}"
+          python3 - "output" "$TAG" "$commit" "${kver:-unknown}" "${btime:-}" "${ptime:-}" "/tmp/fwidx/meta/fw" "$DEVICE_LIST" <<'PY'
           import json, os, sys
-          outdir, tag, commit, kver, btime, idxdir, devices = sys.argv[1:8]
+          outdir, tag, commit, kver, btime, ptime, idxdir, devices = sys.argv[1:8]
           files = sorted(os.listdir(outdir))
           for dev in devices.split():
               up = None
@@ -999,6 +1020,7 @@ jobs:
                   'commit': commit,
                   'kernel_version': kver,
                   'built_at': btime,
+                  'published_at': ptime,
                   'sysupgrade': {
                       'name': up,
                       'sha256': sha,
