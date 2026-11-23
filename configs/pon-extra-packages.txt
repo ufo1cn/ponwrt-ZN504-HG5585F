@@ -6,14 +6,17 @@
 # ---- iptv（kmod-iptv + luci-app-iptv + i18n）已整体移交固件流程 fw-build.yml，
 #      作为独立 apk 随 kmods-<label>-r<run> 预发布交付，本流程不再涉及 iptv。
 
-# ---- 组播代理（kmod-iptv 的配套数据面，非必须但推荐）----
+# ---- 组播代理：omcproxy 已被上游删除（openwrt/routing 2024-09-30 移除，packages/packages-abandoned 均无此路径），
+#      上游 openwrt/omcproxy 只剩 cmake 源码、没有 uci/init，故此处必然 SKIP；要保留得自建 vendor 包。----
 package/feeds/packages/omcproxy|omcproxy|optional
 package/feeds/packages/luci-app-omcproxy|luci-app-omcproxy|optional
 
 # ---- nikki / mihomo（源码 feeds/nikki）----
 package/feeds/nikki/nikki|nikki|required
 package/feeds/nikki/luci-app-nikki|luci-app-nikki|required
-package/feeds/nikki/luci-i18n-nikki-zh-cn|luci-i18n-nikki-zh-cn|optional
+# luci-i18n-nikki-zh-cn 不是独立源码目录：luci.mk 从 luci-app-nikki/po/zh_Hans 生成
+# （LUCI_LC_ALIAS.zh_Hans=zh-cn），所以路径写父包、编父包时一并产出，required 保证没产出就报错。
+package/feeds/nikki/luci-app-nikki|luci-i18n-nikki-zh-cn|required
 package/feeds/nikki/mihomo-meta|mihomo-meta|required
 package/feeds/nikki/mihomo-alpha|mihomo-alpha|required
 
