@@ -76,9 +76,9 @@ on:
           - 'both'
           - 'none'
       scope:
-        description: '编哪一组：both=B类+C类，pon-userspace=B类，extra=C类'
+        description: '编哪一组：both=B类+C类，pon-userspace=B类，extra=C类（默认 extra：B 类由 incremental 编，避免重复）'
         required: true
-        default: 'both'
+        default: 'extra'
         type: choice
         options:
           - 'both'
