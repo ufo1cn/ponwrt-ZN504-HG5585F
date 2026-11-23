@@ -451,6 +451,15 @@ jobs:
           EOF
           echo ">>> 注入完成："
           cat files/etc/ponwrt-version
+          # 概览页「固件版本」来自 /etc/openwrt_release（base-files 模板 + %D/%V/%C 占位符生成），
+          # 把编译时间直接写进模板，出镜像即生效，不依赖首次启动脚本。
+          REL=package/base-files/files/etc/openwrt_release
+          if [ -f "$REL" ]; then
+            sed -i "s|^DISTRIB_DESCRIPTION=.*$|DISTRIB_DESCRIPTION='%D %V %C (built ${BUILT_AT})'|" "$REL"
+            grep -n '^DISTRIB_DESCRIPTION=' "$REL"
+          else
+            echo "::warning::找不到 $REL，概览页固件版本不会带编译时间"
+          fi
           # 检查脚本 / 代理设置 / LuCI 页面都放在 package/luci-app-ponwrt-update 里，
           # 由包管理器安装（不再往 files/ 塞同名文件，避免两处互相覆盖）
 
@@ -855,6 +864,12 @@ jobs:
             fi
           done
           # 版本戳必须带 built_at（与 build-info.txt 共用同一个时间）
+          if grep -q "(built " "$root/etc/openwrt_release" 2>/dev/null; then
+            echo ">>> 概览固件版本已带编译时间: $(grep '^DISTRIB_DESCRIPTION=' "$root/etc/openwrt_release")"
+          else
+            echo "::error::/etc/openwrt_release 的固件版本没带 (built ...)，概览页看不到编译时间"
+            fail=1
+          fi
           ba=$(sed -n 's/^built_at=//p' "$root/etc/ponwrt-version" 2>/dev/null | head -n1)
           case "$ba" in
             [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
