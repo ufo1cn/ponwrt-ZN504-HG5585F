@@ -19,17 +19,23 @@ define Package/luci-app-ponwrt-update/conffiles
 /etc/config/ponwrt_update
 endef
 
-# git 不记录可执行位（内容 API 塞进来的文件一律 0644），装完统一补一遍，
-# 顺带做 luci.mk 默认 postinst 该做的缓存清理 + rpcd 重载。
+# git 不记录可执行位（内容 API 塞进来的文件一律 0644），装完统一补一遍。
+# 注意：出镜像时 postinst 是在 IPKG_INSTROOT 指定的根目录里跑的，所以 chmod
+# 必须带 $${IPKG_INSTROOT} 前缀——以前只在 IPKG_INSTROOT 为空时才 chmod，
+# 结果镜像里 /usr/libexec/rpcd/luci.ponwrt_update 仍是 0644，rpcd 起不来这个对象，
+# LuCI 就会报 “RPC call to luci.ponwrt_update/status failed: Object not found”。
 define Package/luci-app-ponwrt-update/postinst
+for f in /usr/bin/ponwrt-update /usr/bin/ponwrt-fw-check \
+	/usr/libexec/rpcd/luci.ponwrt_update /etc/profile.d/ponwrt-proxy.sh \
+	/etc/uci-defaults/95-ponwrt-version-label; do
+	[ -e "$${IPKG_INSTROOT}$$f" ] && chmod 0755 "$${IPKG_INSTROOT}$$f"
+done
 [ -n "$${IPKG_INSTROOT}" ] || {
-	chmod 0755 /usr/bin/ponwrt-update /usr/bin/ponwrt-fw-check \
-		/usr/libexec/rpcd/luci.ponwrt_update /etc/profile.d/ponwrt-proxy.sh
 	rm -f /tmp/luci-indexcache.*
 	rm -rf /tmp/luci-modulecache/
 	/etc/init.d/rpcd reload 2>/dev/null
-	exit 0
 }
+exit 0
 endef
 
 include $(TOPDIR)/feeds/luci/luci.mk

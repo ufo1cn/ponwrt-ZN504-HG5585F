@@ -207,12 +207,15 @@ return view.extend({
 						]));
 						resultBox.appendChild(E('p', {}, '镜像：' + (r.name || '—')));
 						resultBox.appendChild(E('p', {}, 'sha256：' + (r.sha256 || '—')));
+						resultBox.appendChild(E('p', {}, '远端构建：' + (r.remote_built_at || '—') +
+							'（本地 ' + (st.built_at || '—') + '）'));
 						resultBox.appendChild(E('p', {}, '地址：' + (r.url || '—')));
 						downloadBtn.disabled = false;
 					}
 					else {
 						remote = null;
-						resultBox.appendChild(E('p', {}, '已是最新固件（仓库 tag ' + (r.tag || '') + '，run ' + r.remote_run + '）'));
+						resultBox.appendChild(E('p', {}, '已是最新固件（仓库 tag ' + (r.tag || '') + '，run ' + r.remote_run +
+								'，构建 ' + (r.remote_built_at || '—') + '）'));
 						downloadBtn.disabled = true;
 					}
 				});
@@ -246,6 +249,12 @@ return view.extend({
 
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, '固件更新'),
+			E('p', { 'class': 'cbi-map-descr' }, [
+				E('strong', {}, '当前固件：'),
+				(st.device || '未知') + ' · ' + (st.feature_class || '—') +
+				' · run ' + (st.local_run || '?') + ' · commit ' + (st.commit || '?') +
+				' · 构建 ' + (st.built_at || '未知')
+			]),
 			E('div', { 'class': 'cbi-map-descr' },
 				'从自建 apk 仓库的 meta/fw 索引检查是否有新固件，下载后按索引里的 sha256 校验再刷写。' +
 				'索引只包含本机机型（' + (st.device || '未知') + '）对应的那一份。'),
@@ -273,7 +282,7 @@ return view.extend({
 				kv('机型', st.device),
 				kv('能力类别', st.feature_class),
 				kv('源码 commit', st.commit),
-				kv('构建时间', st.built_at),
+				kv('构建时间（UTC）', st.built_at),
 				kv('固件 run', st.local_run),
 				kv('内核', st.kernel),
 				kv('索引地址', st.index_base)

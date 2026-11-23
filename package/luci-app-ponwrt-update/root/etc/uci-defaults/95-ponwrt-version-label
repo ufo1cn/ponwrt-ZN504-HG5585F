@@ -1,0 +1,16 @@
+#!/bin/sh
+# 让 LuCI 概览里的「固件版本」也带上这次构建的时间，
+# 时间取自 /etc/ponwrt-version 的 built_at（与 build-info.txt / manifest 同一份）。
+# 只在能取到时间、且 DISTRIB_DESCRIPTION 还没带过这个时间时改一次；任何异常都安静退出。
+VF=/etc/ponwrt-version
+OR=/etc/openwrt_release
+[ -f "$VF" ] && [ -f "$OR" ] || exit 0
+ts=$(sed -n 's/^built_at=//p' "$VF" | head -n1)
+[ -n "$ts" ] || exit 0
+desc=$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'$/\1/p" "$OR" | head -n1)
+[ -n "$desc" ] || exit 0
+case "$desc" in
+	*"$ts"*) exit 0 ;;
+esac
+sed -i "s|^DISTRIB_DESCRIPTION=.*$|DISTRIB_DESCRIPTION='${desc} (built ${ts})'|" "$OR" 2>/dev/null || true
+exit 0

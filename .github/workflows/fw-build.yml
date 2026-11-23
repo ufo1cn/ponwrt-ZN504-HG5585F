@@ -436,6 +436,10 @@ jobs:
       - name: Inject firmware version stamp
         run: |
           set -euo pipefail
+          # 成型时间只打一次：镜像里的 /etc/ponwrt-version 与 build-info.txt / manifest
+          # 共用同一个时间戳，避免设备显示开工时间、仓库记录收工时间。
+          BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "BUILT_AT=${BUILT_AT}" >> "$GITHUB_ENV"
           mkdir -p files/etc files/usr/bin
           cat > files/etc/ponwrt-version <<EOF
           device=${{ inputs.device_list }}
@@ -443,7 +447,7 @@ jobs:
           commit=$(git rev-parse HEAD)
           commit_short=$(git rev-parse --short HEAD)
           run=${{ github.run_number }}
-          built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          built_at=${BUILT_AT}
           EOF
           echo ">>> 注入完成："
           cat files/etc/ponwrt-version
@@ -633,7 +637,7 @@ jobs:
             echo "apk_repo_dir=ponwrt-k${KVER}"
             echo "run=${{ github.run_number }}"
             echo "workflow=${{ github.workflow }}"
-            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "built_at=${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
           } | tee output/build-info.txt
 
       - name: Publish provenance baseline to apk repo
@@ -830,7 +834,8 @@ jobs:
           for f in usr/libexec/rpcd/luci.ponwrt_update usr/bin/ponwrt-update \
                    usr/bin/ponwrt-fw-check \
                    www/luci-static/resources/view/ponwrt_update/overview.js \
-                   usr/share/luci/menu.d/luci-app-ponwrt-update.json; do
+                   usr/share/luci/menu.d/luci-app-ponwrt-update.json \
+                   etc/uci-defaults/95-ponwrt-version-label; do
             if [ -e "$root/$f" ]; then
               echo ">>> 固件更新 app 落地: /$f"
             else
@@ -838,6 +843,26 @@ jobs:
               fail=1
             fi
           done
+          # 可执行位必须真的落到镜像里：缺了 rpcd 就起不了 luci.ponwrt_update，
+          # LuCI 会报 “RPC call to luci.ponwrt_update/status failed: Object not found”。
+          for f in usr/libexec/rpcd/luci.ponwrt_update usr/bin/ponwrt-update \
+                   usr/bin/ponwrt-fw-check etc/uci-defaults/95-ponwrt-version-label; do
+            if [ -x "$root/$f" ]; then
+              echo ">>> 可执行位 OK: /$f"
+            else
+              echo "::error::/$f 在镜像里不是可执行（rpcd 对象会缺失、uci-defaults 不会跑）"
+              fail=1
+            fi
+          done
+          # 版本戳必须带 built_at（与 build-info.txt 共用同一个时间）
+          ba=$(sed -n 's/^built_at=//p' "$root/etc/ponwrt-version" 2>/dev/null | head -n1)
+          case "$ba" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+              echo ">>> 版本戳 built_at=$ba" ;;
+            *)
+              echo "::error::/etc/ponwrt-version 的 built_at 缺失或格式不对（'$ba'）"
+              fail=1 ;;
+          esac
           exit $fail
 
       - name: Upload Firmware Artifacts
