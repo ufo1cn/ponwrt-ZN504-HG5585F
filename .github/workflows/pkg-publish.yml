@@ -285,7 +285,9 @@ jobs:
       - name: Stage apks by device capability
         run: |
           set -uo pipefail
-          shopt -s nullglob
+          # 注意：这里绝不能开 nullglob。归类表里写的是通配符本身（kmod-usb-*），
+          # 一旦 nullglob 生效，"for p in $pats" 里没匹配到文件名的模式会被整个吞掉，
+          # 结果所有包静默落进 common（run 2 就是 common=460 这么来的）。
           FEAT_FILE="configs/pon-feature-packages.txt"
           # 能力归类表是"机型能看到哪些包"的唯一依据：缺了就会把所有包塞进 common，
           # 机型的能力目录源永远是空的（装包时报"找不到软件"），所以缺文件直接失败。
@@ -295,12 +297,26 @@ jobs:
             b=$(basename "$1")
             while IFS='|' read -r feat pats; do
               case "$feat" in ''|'#'*) continue ;; esac
-              for p in $pats; do
+              # 用数组接模式，避免任何 glob 展开把模式当文件名处理
+              local -a PP
+              read -r -a PP <<< "$pats"
+              for p in "${PP[@]}"; do
                 case "$b" in $p) echo "$feat"; return ;; esac
               done
             done < "$FEAT_FILE"
             echo common
           }
+          # 自检：归类函数必须真的能把一个已知 usb 包判成 usb，否则后面全是错的
+          probe=$(feature_of "kmod-usb-storage-0.0.0-r0.apk")
+          if [ "$probe" != "usb" ]; then
+            echo "::error::归类函数自检失败（kmod-usb-storage 判为 $probe），归类表或匹配逻辑不可用"
+            exit 1
+          fi
+          probe=$(feature_of "kmod-rtw88-0.0.0-r0.apk")
+          if [ "$probe" != "usb" ] && [ "$probe" != "wifi" ]; then
+            echo "::error::归类函数自检失败（kmod-rtw88 判为 $probe）"
+            exit 1
+          fi
           rm -rf stage && mkdir -p stage
           : > /tmp/dup-same-name.txt
           declare -A sha_of src_of dir_of
