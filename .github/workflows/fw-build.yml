@@ -987,7 +987,7 @@ jobs:
           [ -n "${ptime:-}" ] || ptime="${PUBLISHED_AT:-}"
           python3 - "output" "$TAG" "$commit" "${kver:-unknown}" "${btime:-}" "${ptime:-}" "/tmp/fwidx/meta/fw" "$DEVICE_LIST" <<'PY'
           import json, os, sys
-          outdir, tag, commit, kver, btime, ptime, idxdir, devices = sys.argv[1:8]
+          outdir, tag, commit, kver, btime, ptime, idxdir, devices = sys.argv[1:9]
           files = sorted(os.listdir(outdir))
           for dev in devices.split():
               up = None
