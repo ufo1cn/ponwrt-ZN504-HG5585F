@@ -1,0 +1,366 @@
+#!/bin/sh
+# ==============================================================================
+# /usr/sbin/iptvscan —— IPTV 组播接入 + 频道扫描 + 播放列表
+#
+# 两种线路形态，用 uci iptvscan.main.mode 切换：
+#   mvlan  组播 VLAN（默认 50）上就有裸组播 → 只收流，不动机顶盒拨号
+#   pppoe  组播锁在机顶盒 PPPoE 会话里 → 路由器自己接管拨号（45 号 VLAN）
+#   auto   先试 mvlan（探 10s），没组播再退到 pppoe（未填账号则只告警）
+#   raw    不做网络变更，直接用指定设备抓
+#
+#   iptvscan apply       建/更新网络接口 + 同步 rtp2httpd 的 upstream_interface
+#   iptvscan probe       只探测线路，报告 mvlan 有没有组播
+#   iptvscan dev         打印当前实际用于抓包的设备名
+#   iptvscan scan-bg     后台抓一次（页面按钮）
+#   iptvscan scan        前台抓一次
+#   iptvscan gen|list|status|clean|daemon
+#
+# 配置全部在 /etc/config/iptvscan，脚本内不硬编码账号和 VLAN。
+# ==============================================================================
+set -u
+
+CONF=iptvscan
+STATE=/tmp/iptvscan.status
+LOG=/tmp/iptvscan.log
+NAMES_TMP=/tmp/iptvscan.names
+
+MV_NET=iptvscan_mvlan
+MV_DEV=iptvscan_mvlan_dev
+PP_NET=iptvscan_pppoe
+PP_DEV=iptvscan_pppoe_dev
+
+get()  { uci -q get "$CONF.main.$1" 2>/dev/null; }
+gdef() { v=$(get "$1"); [ -n "${v:-}" ] || v=$2; echo "$v"; }
+
+mode()     { gdef mode auto; }
+pon()      { v=$(get pon_iface); [ -n "${v:-}" ] || v=$(detect_pon); echo "$v"; }
+biz_vid()  { gdef biz_vid 45; }
+mv_vid()   { gdef mvlan_vid 50; }
+dur()      { gdef duration 60; }
+m3u()      { gdef m3u_path /www/iptv.m3u; }
+db()       { gdef db_path /etc/iptvscan-groups.db; }
+
+write_status() {
+	{ echo "state=$1"; echo "msg=$2"; echo "count=$3"; echo "ts=$(date +%s)"; } \
+		> "$STATE.tmp" 2>/dev/null && mv "$STATE.tmp" "$STATE" 2>/dev/null
+	:
+}
+
+detect_pon() {
+	# 1) 已存在的 45 号 vlan 的父设备
+	for d in /sys/class/net/*; do
+		n=${d##*/}
+		case "$n" in
+			*."$(biz_vid)") echo "${n%.*}"; return ;;
+		esac
+	done
+	# 2) 常见 PON 侧设备名
+	for n in pon0 pon1 eth1 eth0; do
+		[ -e "/sys/class/net/$n" ] && { echo "$n"; return; }
+	done
+	echo eth1
+}
+
+# 逻辑接口名 → 实际 L3 设备名（pppoe 会变成 pppoe-xxx）
+l3dev() {
+	d=$(ubus call network.interface."$1" status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+	[ -n "${d:-}" ] || d=$1
+	echo "$d"
+}
+
+net_up() {
+	ubus call network.interface."$1" up >/dev/null 2>&1 || ifup "$1" >/dev/null 2>&1
+	:
+}
+
+set_vlan_dev() {
+	# $1=设备段名  $2=vid  $3=父设备
+	uci -q delete network."$1" 2>/dev/null
+	uci set network."$1"=device
+	uci set network."$1".name="$1"
+	uci set network."$1".type=8021q
+	uci set network."$1".ifname="$3"
+	uci set network."$1".vid="$2"
+}
+
+setup_mvlan() {
+	set_vlan_dev "$MV_DEV" "$(mv_vid)" "$(pon)"
+	uci -q delete network."$MV_NET" 2>/dev/null
+	uci set network."$MV_NET"=interface
+	uci set network."$MV_NET".proto=none
+	uci set network."$MV_NET".device="$MV_DEV"
+	uci commit network
+	net_up "$MV_NET"
+	:
+}
+
+setup_pppoe() {
+	u=$(get pppoe_user); p=$(get pppoe_pass)
+	if [ -z "${u:-}" ] || [ -z "${p:-}" ]; then
+		echo "PPPOE_NO_CRED" >&2
+		return 1
+	fi
+	set_vlan_dev "$PP_DEV" "$(biz_vid)" "$(pon)"
+	uci -q delete network."$PP_NET" 2>/dev/null
+	uci set network."$PP_NET"=interface
+	uci set network."$PP_NET".proto=pppoe
+	uci set network."$PP_NET".device="$PP_DEV"
+	uci set network."$PP_NET".username="$u"
+	uci set network."$PP_NET".password="$p"
+	uci set network."$PP_NET".ipv6=0
+	uci set network."$PP_NET".peerdns=0
+	ma=$(get pppoe_mac)
+	[ -n "${ma:-}" ] && uci set network."$PP_NET".macaddr="$ma"
+	uci commit network
+	net_up "$PP_NET"
+
+	# 等 PPP 拿到地址，最多 25s
+	i=0
+	while [ "$i" -lt 25 ]; do
+		d=$(l3dev "$PP_NET")
+		if [ -n "${d:-}" ] && ip -4 addr show "$d" 2>/dev/null | grep -q 'inet '; then
+			echo "$d"; return 0
+		fi
+		sleep 1; i=$((i + 1))
+	done
+	echo "PPPOE_NO_IP" >&2
+	return 1
+}
+
+probe_dev() {
+	# $1 = 设备名  $2 = 秒数；有组播帧返回 0
+	d=$1; s=${2:-10}
+	: > /tmp/iptvscan.probe
+	timeout "$s" tcpdump -i "$d" -n -s 96 -c 40 'igmp or (udp and dst net 239.0.0.0/8)' \
+		> /tmp/iptvscan.probe 2>/dev/null
+	n=$(wc -l < /tmp/iptvscan.probe 2>/dev/null)
+	[ "${n:-0}" -gt 0 ]
+}
+
+resolve_dev() {
+	case "$(mode)" in
+		raw)
+			d=$(get raw_dev); [ -n "${d:-}" ] || d=$(pon); echo "$d" ;;
+		mvlan)
+			setup_mvlan >/dev/null 2>&1
+			echo "$(l3dev "$MV_NET")" ;;
+		pppoe)
+			dp=$(l3dev "$PP_NET")
+			if ip -4 addr show "$dp" 2>/dev/null | grep -q 'inet '; then
+				echo "$dp"
+			else
+				setup_pppoe 2>/dev/null || echo "PPPOE_FAIL"
+			fi ;;
+		*)
+			# auto：mvlan 优先，探不到再退 pppoe
+			setup_mvlan >/dev/null 2>&1
+			dm=$(l3dev "$MV_NET")
+			if [ -n "${dm:-}" ] && probe_dev "$dm" "$(gdef auto_probe_sec 12)"; then
+				echo "$dm"
+			elif [ -n "$(get pppoe_user)" ]; then
+				setup_pppoe 2>/dev/null || echo "$dm"
+			else
+				echo "$dm"
+			fi ;;
+	esac
+}
+
+sync_rtp2httpd() {
+	dev=$1
+	sec=$(gdef rtp2httpd_section main)
+	[ "$(get rtp2httpd_sync)" = "0" ] && { echo "跳过 rtp2httpd 同步"; return 0; }
+	cur=$(uci -q get "rtp2httpd.$sec.upstream_interface")
+	if [ "$cur" = "$dev" ]; then echo "rtp2httpd upstream 已是 $dev"; return 0; fi
+	uci set "rtp2httpd.$sec.upstream_interface=$dev"
+	uci commit rtp2httpd
+	/etc/init.d/rtp2httpd reload >/dev/null 2>&1 || /etc/init.d/rtp2httpd restart >/dev/null 2>&1
+	echo "rtp2httpd upstream → $dev"
+}
+
+reload_rtp2httpd() {
+	[ "$(get reload_rtp2httpd)" = "0" ] && return 0
+	sp=""
+	for p in $(pidof rtp2httpd 2>/dev/null); do
+		[ "$(awk '/^PPid:/{print $2}' /proc/"$p"/status 2>/dev/null)" = "1" ] && { sp=$p; break; }
+	done
+	[ -n "$sp" ] && kill -HUP "$sp" 2>/dev/null && echo "已通知 rtp2httpd 重读"
+	:
+}
+
+extract() {
+	log=$1; DB=$DB_PATH
+	{ grep -oE 'igmp v[0-9] (report|leave) 239[0-9.]*' "$log" 2>/dev/null | awk '{print $NF}'
+	  grep -oE '239[0-9.]*: igmp' "$log" 2>/dev/null | awk '{gsub(":","",$1); print $1}'
+	} | sort -u > /tmp/iptvscan.groups
+
+	awk '{
+		for (i = 1; i <= NF; i++)
+			if ($i ~ /^239\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+				split($i, a, "."); print a[1]"."a[2]"."a[3]"."a[4], a[5]; break
+			}
+	}' "$log" 2>/dev/null | sort -u > /tmp/iptvscan.pairs
+
+	[ -f "$DB" ] || : > "$DB"
+	cat "$DB" /tmp/iptvscan.pairs /tmp/iptvscan.groups 2>/dev/null | awk '
+		$1 !~ /^239\./ { next }
+		{ ip = $1; if ($2 != "" && $2 != "-") port[ip] = $2; else if (!(ip in port)) port[ip] = "-"; seen[ip] = 1 }
+		END { for (ip in seen) print ip, port[ip] }
+	' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n > "$DB.tmp" && mv "$DB.tmp" "$DB"
+}
+
+gen_m3u() {
+	DB_PATH=$(db); OUT=$(m3u)
+	[ -s "$DB_PATH" ] || { echo "频道库为空"; return 1; }
+	uci -q get "$CONF.main.names" > "$NAMES_TMP" 2>/dev/null || : > "$NAMES_TMP"
+	DEF=$(awk '$2 ~ /^[0-9]+$/' "$DB_PATH" | awk '{print $2}' | sort | uniq -c | sort -rn | head -n1 | awk '{print $2}')
+	[ -n "${DEF:-}" ] || DEF=5146
+	mkdir -p "$(dirname "$OUT")" 2>/dev/null
+	{ echo "#EXTM3U"; echo "# iptvscan $(date '+%Y-%m-%d %H:%M') $(wc -l < "$DB_PATH") 组"; } > "$OUT.tmp"
+	awk -v def="$DEF" -v names="$NAMES_TMP" '
+	BEGIN { while ((getline l < names) > 0) { if (l ~ /^#/ || l == "") continue; sp = index(l, " "); if (sp > 0) name[substr(l,1,sp-1)] = substr(l,sp+1) } }
+	{ g = $1; u = $2; if (u == "-" || u == "") u = def; n = (g in name) ? name[g] : g
+	  print "#EXTINF:-1 tvg-id=\"" g "\" tvg-name=\"" n "\" group-title=\"IPTV\"," n
+	  print "rtp://" g ":" u }' "$DB_PATH" >> "$OUT.tmp"
+	mv "$OUT.tmp" "$OUT"; chmod 644 "$OUT" 2>/dev/null
+	echo "$(wc -l < "$DB_PATH") 组 → $OUT"
+}
+
+do_scan() {
+	DB_PATH=$(db); DUR=$(dur)
+	write_status running "准备线路…" 0
+	dev=$(resolve_dev)
+	case "$dev" in
+		"")	write_status failed "拿不到可用设备：检查 PON 口 / VLAN / PPPoE 凭据" 0; return 1 ;;
+		PPPOE_*)
+			write_status failed "PPPoE 未就绪：检查账号密码、克隆 MAC，或改回 mvlan 模式" 0; return 1 ;;
+	esac
+	[ -e "/sys/class/net/$dev" ] || { write_status failed "设备 $dev 不存在" 0; return 1; }
+
+	write_status running "抓包中（${DUR}s，$dev），请逐个换台" 0
+	rm -f "$LOG"
+	tcpdump -i "$dev" -n -s 128 -l 'igmp or (udp and net 239.0.0.0/8)' -c 6000 > "$LOG" 2>/tmp/iptvscan.err &
+	pid=$!
+	sleep "$DUR"
+	kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+
+	[ -s "$LOG" ] || { write_status failed "没抓到包（$dev）：线路无组播或有流但未 join" 0; return 1; }
+	extract "$LOG"
+	gen_m3u > /tmp/iptvscan.gen.out 2>&1
+	rc=$?
+	reload_rtp2httpd >> /tmp/iptvscan.gen.out 2>&1
+	[ $rc -ne 0 ] && { write_status failed "$(tail -n1 /tmp/iptvscan.gen.out)" 0; return 1; }
+	write_status done "$(tail -n1 /tmp/iptvscan.gen.out) [$dev]" "$(wc -l < "$DB_PATH")"
+}
+
+do_apply() {
+	d=$(resolve_dev)
+	[ -n "${d:-}" ] || { echo "线路不可用"; return 1; }
+	sync_rtp2httpd "$d"
+	echo "抓包设备: $d"
+}
+
+do_probe() {
+	setup_mvlan >/dev/null 2>&1
+	dm=$(l3dev "$MV_NET")
+	echo "MVLAN 设备: ${dm:-无}"
+	if [ -n "${dm:-}" ] && probe_dev "$dm" "$(gdef auto_probe_sec 12)"; then
+		echo "结果: MVLAN($(mv_vid)) 上有组播 → 用模式 mvlan，不需要账号密码"
+		return 0
+	fi
+	echo "结果: MVLAN($(mv_vid)) 上没抓到组播"
+	if [ -n "$(get pppoe_user)" ]; then
+		echo "→ 可退到 pppoe 模式接管 45 号 VLAN 拨号"
+	else
+		echo "→ 如需局域网转播只能接管 PPPoE 拨号，请先填 IPTV 账号密码"
+	fi
+	return 1
+}
+
+sniff_dev() {
+	d=$(get sniff_dev)
+	[ -n "${d:-}" ] && { echo "$d"; return; }
+	if [ -e /sys/class/net/br-iptv ]; then echo br-iptv; else echo "$(pon)"; fi
+}
+
+do_sniff() {
+	dev=$(sniff_dev); dur=$(gdef sniff_sec 45); pcap=/tmp/iptvscan.ppp.pcap
+	CRED=/tmp/iptvscan.cred
+	: > "$CRED"
+	write_status running "等待机顶盒重新拨号（${dur}s）：现在给机顶盒断电重启" 0
+	rm -f "$pcap"
+	tcpdump -i "$dev" -n -s 0 -c 200 -w "$pcap" 'pppoe' >/dev/null 2>&1 &
+	pid=$!
+	sleep "$dur"
+	kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+
+	if [ ! -s "$pcap" ]; then
+		echo "type=NONE" >> "$CRED"
+		write_status failed "没抓到 PPPoE 帧（$dev）：确认嗅探口是桥接机顶盒的那个，且期间机顶盒重拨了" 0
+		return 1
+	fi
+
+	auth=UNKNOWN
+	tcpdump -r "$pcap" -n 2>/dev/null | grep -q 'PAP' && auth=PAP
+	tcpdump -r "$pcap" -n 2>/dev/null | grep -q 'CHAP' && auth=CHAP
+
+	# 从二进制里抽可打印串，保留顺序（PAP 里 用户名 紧跟 密码）
+	tr -c '[:print:]' '\n' < "$pcap" > /tmp/iptvscan.strings
+	user=$(awk 'length($0) >= 4 && /@/' /tmp/iptvscan.strings | sort -u | head -n1)
+	pass=""
+	if [ "$auth" = "PAP" ] && [ -n "${user:-}" ]; then
+		pass=$(awk -v u="$user" 'p && length($0) >= 1 { print; exit } $0 == u { p = 1 }' /tmp/iptvscan.strings)
+	fi
+
+	{ echo "type=$auth"; echo "user=${user:-}"; echo "pass=${pass:-}"; } > "$CRED"
+
+	if [ "$auth" = "CHAP" ]; then
+		write_status done "抓到 CHAP 认证：只能拿到用户名，密码是挑战应答，抓不到" 0
+	elif [ -n "${pass:-}" ]; then
+		write_status done "抓到 PAP 明文：账号/密码已写入 /tmp/iptvscan.cred" 0
+	elif [ -n "${user:-}" ]; then
+		write_status done "抓到用户名，未取到密码（可能不是 PAP，或串被截断）" 0
+	else
+		write_status failed "抓到 PPPoE 帧但没解析出账号：确认机顶盒重拨时嗅探口在线" 0
+		return 1
+	fi
+}
+
+do_use_creds() {
+	CRED=/tmp/iptvscan.cred
+	[ -s "$CRED" ] || { echo "还没有嗅探结果"; return 1; }
+	u=$(grep -m1 '^user=' "$CRED" | cut -d= -f2-)
+	p=$(grep -m1 '^pass=' "$CRED" | cut -d= -f2-)
+	[ -n "${u:-}" ] && uci set iptvscan.main.pppoe_user="$u"
+	[ -n "${p:-}" ] && uci set iptvscan.main.pppoe_pass="$p"
+	uci commit iptvscan
+	echo "已填入: user=${u:-（空）} pass=$( [ -n "${p:-}" ] && echo 已填 || echo 空 )"
+}
+
+do_daemon() {
+	while :; do
+		iv=$(get interval); [ -n "${iv:-}" ] || iv=0
+		en=$(get enabled); [ -n "${en:-}" ] || en=0
+		if [ "$en" = "1" ] && [ "$iv" -gt 0 ] 2>/dev/null; then do_scan; sf=$((iv * 60))
+		else sf=300; fi
+		[ "$sf" -lt 60 ] && sf=60
+		sleep "$sf"
+	done
+}
+
+case "${1:-status}" in
+	apply)   do_apply ;;
+	probe)   do_probe ;;
+	dev)     resolve_dev ;;
+	sniff)   do_sniff ;;
+	sniff-bg) ( trap '' HUP; do_sniff ) >/dev/null 2>&1 < /dev/null & echo started ;;
+	use-creds) do_use_creds ;;
+	scan-bg) ( trap '' HUP; do_scan ) >/dev/null 2>&1 < /dev/null & echo started ;;
+	scan)    do_scan ;;
+	gen)     gen_m3u && reload_rtp2httpd ;;
+	list)    cat "$(db)" ;;
+	status)  cat "$STATE" 2>/dev/null || echo "state=idle" ;;
+	cred)    cat /tmp/iptvscan.cred 2>/dev/null ;;
+	clean)   : > "$(db)"; gen_m3u ;;
+	daemon)  do_daemon ;;
+	*)       echo "用法: $0 apply|probe|dev|sniff|sniff-bg|use-creds|scan-bg|scan|gen|list|status|cred|clean|daemon" >&2; exit 1 ;;
+esac

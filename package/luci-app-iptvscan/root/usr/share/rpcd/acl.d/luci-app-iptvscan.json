@@ -1,0 +1,31 @@
+{
+	"luci-app-iptvscan": {
+		"description": "IPTV channel scanner: switch between MVLAN and PPPoE transport, run the backend scanner, read scan state",
+		"read": {
+			"file": {
+				"/tmp/iptvscan.status": [ "read" ],
+				"/tmp/iptvscan.log": [ "read" ],
+				"/etc/iptvscan-groups.db": [ "read" ],
+				"/tmp/iptvscan.cred": [ "read" ],
+				"/www/iptv.m3u": [ "read" ],
+				"/proc/net/dev": [ "read" ]
+			},
+			"ubus": {
+				"file": [ "read" ],
+				"network.interface": [ "status" ]
+			},
+			"uci": [ "iptvscan", "rtp2httpd", "network" ]
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/iptvscan": [ "exec" ],
+				"/www/iptv.m3u": [ "write" ]
+			},
+			"ubus": {
+				"file": [ "exec" ],
+				"network.interface": [ "up", "down" ]
+			},
+			"uci": [ "iptvscan", "network", "rtp2httpd" ]
+		}
+	}
+}

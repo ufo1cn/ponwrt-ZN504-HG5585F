@@ -1,0 +1,32 @@
+config iptvscan 'main'
+	option enabled '0'
+	option interval '720'
+
+	# 线路模式：auto | mvlan | pppoe | raw
+	option mode 'auto'
+
+	# PON 侧物理网卡（留空 = 自动探测承载 45 号 VLAN 的父设备）
+	option pon_iface ''
+	option biz_vid '45'
+	option mvlan_vid '50'
+	option auto_probe_sec '12'
+
+	# pppoe 模式用的 IPTV 拨号凭据（与上网账号不同，通常以 @vod 结尾）
+	option pppoe_user ''
+	option pppoe_pass ''
+	option pppoe_mac ''
+
+	# raw 模式直接指定设备（不做任何网络变更）
+	option raw_dev ''
+
+	# 嗅探机顶盒拨号凭据时抓哪个口（留空 = 有 br-iptv 就用它，否则用 PON 口）
+	option sniff_dev ''
+	option sniff_sec '45'
+
+	option duration '60'
+	option m3u_path '/www/iptv.m3u'
+	option db_path '/etc/iptvscan-groups.db'
+	option reload_rtp2httpd '1'
+	option rtp2httpd_sync '1'
+	option rtp2httpd_section 'main'
+	option names ''

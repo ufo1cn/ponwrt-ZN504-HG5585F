@@ -1,0 +1,13 @@
+{
+	"admin/services/iptvscan": {
+		"title": "IPTV 频道扫描",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "iptvscan"
+		},
+		"depends": {
+			"acl": [ "luci-app-iptvscan" ]
+		}
+	}
+}
