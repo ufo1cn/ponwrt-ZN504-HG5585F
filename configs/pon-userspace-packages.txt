@@ -4,7 +4,6 @@
 # 说明：optional 表示源码可能不存在；当前清单无 optional 项。
 
 # ---- 自有用户态应用 ----
-package/pon-userspace/tempinfo|tempinfo|required
 package/pon-userspace/camlive|camlive|required
 package/pon-userspace/go2rtc|go2rtc|required
 package/pon-userspace/gensio|gensio|required
