@@ -219,10 +219,12 @@ jobs:
             fi
             echo ">>> 应用能力片段: $f"
             while IFS= read -r line; do
+              # 通用 CONFIG_ 符号（不限于 CONFIG_PACKAGE_）：busybox 选项
+              # （CONFIG_BUSYBOX_CONFIG_*）也必须能落到 .config，否则会被静默丢弃
               case "$line" in
-                '# CONFIG_PACKAGE_'*' is not set')
+                '# CONFIG_'*' is not set')
                   sym=${line#\# }; sym=${sym%% is not set*}; val="notset" ;;
-                'CONFIG_PACKAGE_'*=*)
+                'CONFIG_'*=*)
                   sym=${line%%=*}; val=${line#*=} ;;
                 *) continue ;;
               esac
@@ -249,9 +251,9 @@ jobs:
             n_repo_skip=0
             while IFS= read -r line; do
               case "$line" in
-                '# CONFIG_PACKAGE_'*' is not set')
+                '# CONFIG_'*' is not set')
                   sym=${line#\# }; sym=${sym%% is not set*}; val="notset" ;;
-                'CONFIG_PACKAGE_'*=*)
+                'CONFIG_'*=*)
                   sym=${line%%=*}; val=${line#*=} ;;
                 *) continue ;;
               esac
@@ -327,8 +329,8 @@ jobs:
             [ -f "$f" ] || continue
             while IFS= read -r line; do
               case "$line" in
-                '# CONFIG_PACKAGE_'*' is not set') sym=${line#\# }; sym=${sym%% is not set*} ;;
-                'CONFIG_PACKAGE_'*=*) sym=${line%%=*} ;;
+                '# CONFIG_'*' is not set') sym=${line#\# }; sym=${sym%% is not set*} ;;
+                'CONFIG_'*=*) sym=${line%%=*} ;;
                 *) continue ;;
               esac
               grep -qE "^(# )?${sym}(=| is not set)" .config || missing_syms="$missing_syms ${sym}"
@@ -342,6 +344,29 @@ jobs:
                 || { echo "::error::usb 能力已启用，但 .config 里缺 ${s}"; exit 1; }
             done
             echo ">>> usb 能力：USB 核心栈已选中"
+            # U 盘自动挂载依赖：busybox blkid 认得这些卷 + 镜像里带 block-mount
+            for s in CONFIG_BUSYBOX_CONFIG_VOLUMEID \
+                     CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_FAT \
+                     CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_EXT \
+                     CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_EXFAT \
+                     CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_NTFS \
+                     CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_F2FS \
+                     CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_BTRFS; do
+              grep -q "^${s}=y" .config \
+                || { echo "::error::usb 能力已启用，但 ${s} 不是 =y（插 U 盘不会被识别/自动挂载）"; exit 1; }
+            done
+            if [ "${{ inputs.bake_usb }}" = "true" ]; then
+              for s in kmod-fs-vfat kmod-fs-ext4 kmod-fs-exfat kmod-fs-ntfs3 kmod-fs-f2fs kmod-usb-storage; do
+                grep -q "^CONFIG_PACKAGE_${s}=y" .config \
+                  || { echo "::error::usb 能力已启用，但 ${s} 不是 =y（识别到卷却挂不上）"; exit 1; }
+              done
+            fi
+            grep -q '^CONFIG_PACKAGE_block-mount=y' .config \
+              || { echo "::error::usb 能力已启用，但 block-mount 不是 =y（没有热插拔挂载脚本）"; exit 1; }
+            # btrfs 只出 apk，禁止被烘进镜像（体积考虑）
+            grep -q '^CONFIG_PACKAGE_kmod-fs-btrfs=m' .config \
+              || { echo "::error::kmod-fs-btrfs 应为 =m（只出 apk，不进镜像）"; exit 1; }
+            echo ">>> usb 能力：blkid 识别 + 文件系统驱动 + block-mount 已进镜像"
           fi
           if has_cap wifi; then
             grep -q "^CONFIG_PACKAGE_kmod-mt7915e=y" .config \
