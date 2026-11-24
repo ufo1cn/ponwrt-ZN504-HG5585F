@@ -63,6 +63,10 @@ local function status_html()
         body = body .. "\n\n扫描日志 /tmp/btsp-scan.log（最近 30 行）:\n"
             .. grab("tail -n 30 /tmp/btsp-scan.log")
     end
+    if fs.access("/tmp/btsp-pair.log") then
+        body = body .. "\n\n配对日志 /tmp/btsp-pair.log（HID 的 6 位配对码在这里，最近 40 行）:\n"
+            .. grab("tail -n 40 /tmp/btsp-pair.log")
+    end
     local head = ""
     if notice ~= "" then
         head = "<strong class=\"cbi-error\">" .. esc(notice) .. "</strong><br />"
@@ -114,6 +118,28 @@ function o.write(self, section)
     if sys.call("bluetoothctl info " .. mac .. " 2>/dev/null | grep -q 'Paired: yes'") ~= 0 then
         notice = translate("配对没成功（HC-05 这类固定 PIN 模块要在 SSH 里 bluetoothctl 手动配一次）；rfcomm 绑定已尝试执行")
     end
+    refresh()
+end
+
+o = s:option(Button, "_pairhid", translate("键盘/鼠标/遥控配对"))
+o.inputtitle = translate("开始配对（HID）")
+o.inputstyle = "apply"
+o.description = translate("HID 设备要求 6 位配对码校验：点后约 5 秒刷新本页，"
+    .. "在下面「配对日志」里找 Passkey / 配对码，用蓝牙键盘敲入即可；2 分钟超时。"
+    .. "（SPP 串口模块继续用上面的「配对并绑定」）")
+function o.write(self, section)
+    notice = ""
+    local mac = field_val("mac"):upper()
+    if not mac:match("^%x%x:%x%x:%x%x:%x%x:%x%x:%x%x$") then
+        notice = translate("MAC 地址格式不对，应为 AA:BB:CC:DD:EE:FF；已跳过配对")
+        refresh()
+        return
+    end
+    self.map.uci:set("btsp", "main", "mac", mac)
+    self.map.uci:commit("btsp")
+    sys.exec("( /etc/init.d/btsp pairhid " .. mac .. " ) >/dev/null 2>&1 &")
+    notice = translate("已按 DisplayYesNo 后台开始配对（2 分钟有效）：等几秒刷新本页，"
+        .. "从下面配对日志里取 6 位码，在键盘上敲入。")
     refresh()
 end
 

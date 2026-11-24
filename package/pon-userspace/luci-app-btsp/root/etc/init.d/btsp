@@ -6,6 +6,7 @@ START=95
 STOP=05
 
 LOG=/tmp/btsp-scan.log
+PAIRLOG=/tmp/btsp-pair.log
 
 load_cfg() {
 	config_load btsp
@@ -47,6 +48,32 @@ pair_mac() {
 	bluetoothctl info "$mac" 2>/dev/null | grep -q 'Paired: yes' || return 1
 	bluetoothctl trust "$mac" >/dev/null 2>&1
 	return 0
+}
+
+# HID（键盘 / 鼠标 / 遥控）配对：这类设备要求经过认证的配对，agent 必须是 DisplayYesNo。
+# 路由器没有屏，所以由本机当“显示端”：6 位配对码写进 $PAIRLOG，用户在对端键盘上敲入即可。
+# 与 pair_mac 的 NoInputNoOutput（SPP 模块免校验自动配对）分开，互不影响。
+pair_hid_mac() {
+	local mac="$1"
+	command -v bluetoothctl >/dev/null 2>&1 || return 1
+	bt_daemon_up || return 1
+	: > "$PAIRLOG"
+	logger -t btsp "pairhid: $mac 进入 DisplayYesNo 配对，配对码写入 $PAIRLOG"
+	{
+		printf 'agent DisplayYesNo\n'
+		printf 'default-agent\n'
+		printf 'power on\n'
+		printf 'pair %s\n' "$mac"
+		printf 'trust %s\n' "$mac"
+		printf 'quit\n'
+	} | bluetoothctl --timeout 120 >>"$PAIRLOG" 2>&1
+
+	if bluetoothctl info "$mac" 2>/dev/null | grep -q 'Paired: yes'; then
+		logger -t btsp "pairhid: $mac 配对成功"
+		return 0
+	fi
+	echo "btsp: $mac 配对超时或失败，配对日志见 $PAIRLOG" >&2
+	return 1
 }
 
 start() {
@@ -94,6 +121,7 @@ reload() {
 # 手动动作
 extra_command "scan" "扫描附近蓝牙设备（约 7 秒，日志在 $LOG）"
 extra_command "pair" "配对并信任指定 MAC：pair <MAC>"
+extra_command "pairhid" "键盘/鼠标/遥控配对（DisplayYesNo，配对码写 $PAIRLOG）：pairhid <MAC>"
 extra_command "bind" "手动绑定：bind <MAC> [channel]"
 extra_command "release" "释放 rfcomm 绑定"
 extra_command "btstatus" "查看当前绑定与已配对设备"
@@ -133,6 +161,25 @@ pair() {
 		return 1
 	}
 	echo "btsp: $1 已配对并 trust"
+}
+
+pairhid() {
+	[ -n "$1" ] || {
+		echo "用法: /etc/init.d/btsp pairhid <MAC>" >&2
+		return 1
+	}
+	ensure_bt || {
+		echo "btsp: 蓝牙不可用" >&2
+		return 1
+	}
+	pair_hid_mac "$1" || return 1
+	echo "btsp: $1 已配对并 trust（HID）"
+	has_input_dev && echo "btsp: 已看到输入设备节点（/dev/input/event*）"
+	return 0
+}
+
+has_input_dev() {
+	ls /dev/input/event* >/dev/null 2>&1
 }
 
 bind() {
