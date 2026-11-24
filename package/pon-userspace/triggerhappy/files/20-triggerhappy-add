@@ -1,0 +1,21 @@
+#!/bin/sh
+# 新 input 设备（蓝牙键鼠/遥控配对后出现的 /dev/input/event*）热插入时，
+# 把设备交给正在运行的 thd。
+[ "$SUBSYSTEM" = "input" ] || exit 0
+
+case "$DEVNAME" in
+	/dev/*) dev="$DEVNAME" ;;
+	*) dev="/dev/$DEVNAME" ;;
+esac
+
+case "$dev" in
+	/dev/input/event*) ;;
+	*) exit 0 ;;
+esac
+
+sock=/var/run/triggerhappy.sock
+[ -S "$sock" ] || exit 0
+pidof thd >/dev/null 2>&1 || exit 0
+
+/usr/sbin/th-cmd --socket "$sock" --add "$dev" 2>/dev/null
+exit 0

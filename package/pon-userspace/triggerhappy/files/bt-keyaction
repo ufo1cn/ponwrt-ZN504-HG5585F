@@ -1,0 +1,20 @@
+#!/bin/sh
+# /usr/bin/bt-keyaction —— triggerhappy 规则的统一入口
+#
+# 用法：bt-keyaction <动作名>
+# 行为：读 uci 配置 bt-keys.<动作名>.cmd；有命令就后台执行，没有就只记一条日志。
+# 用户把 /etc/config/bt-keys 里对应 section 的 cmd 改成任意 shell 命令即可生效。
+
+action="$1"
+[ -n "$action" ] || exit 1
+
+cmd="$(uci -q get "bt-keys.$action.cmd" 2>/dev/null)"
+
+if [ -z "$cmd" ]; then
+	logger -t bt-keyaction "key '$action' 未配置 cmd（/etc/config/bt-keys.$action.cmd）"
+	exit 0
+fi
+
+logger -t bt-keyaction "key '$action' -> $cmd"
+( sh -c "$cmd" ) >/dev/null 2>&1 &
+exit 0
