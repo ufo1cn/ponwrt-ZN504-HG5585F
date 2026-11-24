@@ -5,6 +5,7 @@
 
 # ---- 自有用户态应用 ----
 package/luci-app-iptvscan|luci-app-iptvscan|required
+package/luci-app-ponwrt-update|luci-app-ponwrt-update|required
 package/pon-userspace/camlive|camlive|required
 package/pon-userspace/go2rtc|go2rtc|required
 package/pon-userspace/gensio|gensio|required
