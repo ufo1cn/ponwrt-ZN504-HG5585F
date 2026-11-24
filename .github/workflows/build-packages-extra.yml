@@ -473,6 +473,10 @@ jobs:
             staging_dir/host
           key: ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18') }}-${{ github.run_id }}
 
+      - name: Enforce firmware baseline parity (hard gate)
+        if: always()
+        run: bash .github/scripts/check-fw-parity.sh
+
       - name: Stage host apk tool for the publish workflow
         if: always()
         run: |
