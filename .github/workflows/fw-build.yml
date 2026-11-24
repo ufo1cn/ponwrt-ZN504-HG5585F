@@ -325,18 +325,26 @@ jobs:
           # defconfig 之后仍不存在的片段符号：只告警（kconfig 判定依赖不满足，
           # 这类符号不能靠 CONFIG_PACKAGE_ 强行选中），逐个列出便于下一轮核对
           missing_syms=""
+          off_syms=""
           for f in $(for c in $APPLY_CAPS; do echo "configs/features/${c}.config"; done) "$REPO_FRAG"; do
             [ -f "$f" ] || continue
             while IFS= read -r line; do
               case "$line" in
-                '# CONFIG_'*' is not set') sym=${line#\# }; sym=${sym%% is not set*} ;;
-                'CONFIG_'*=*) sym=${line%%=*} ;;
+                '# CONFIG_'*' is not set')
+                  sym=${line#\# }; sym=${sym%% is not set*}; val="notset" ;;
+                'CONFIG_'*=*) sym=${line%%=*}; val=${line#*=} ;;
                 *) continue ;;
               esac
-              grep -qE "^(# )?${sym}(=| is not set)" .config || missing_syms="$missing_syms ${sym}"
+              if ! grep -qE "^(# )?${sym}(=| is not set)" .config; then
+                missing_syms="$missing_syms ${sym}"
+              elif [ "$val" != "notset" ] && grep -qx "# ${sym} is not set" .config; then
+                # 符号存在但被 kconfig 关掉：多半是内核层显式 not set 压过了包选择
+                off_syms="$off_syms ${sym}"
+              fi
             done < "$f"
           done
           [ -z "$missing_syms" ] || echo "::warning::以下符号 kconfig 判定不可选（不会进 .config）:${missing_syms}"
+          [ -z "$off_syms" ] || echo "::warning::以下符号被 kconfig 关掉（片段要求 y/m，实际 not set）:${off_syms}"
 
           if has_cap usb; then
             for s in kmod-usb-core kmod-usb-net; do
