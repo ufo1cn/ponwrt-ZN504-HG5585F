@@ -23,3 +23,24 @@ package/feeds/packages/bluez|bluez-daemon|required
 package/feeds/packages/bluez|bluez-libs|required
 package/feeds/packages/dbus|libdbus|required
 package/feeds/packages/dbus|dbus|required
+
+# ---- IPTV 组播转单播（feed 内包，纯用户态）----
+package/feeds/packages/msd_lite|msd_lite|required
+package/feeds/luci/luci-app-msd_lite|luci-app-msd_lite|required
+package/feeds/luci/luci-app-msd_lite|luci-i18n-msd_lite-zh-cn|required
+
+# ---- 抓包 / 流量分析（feed 内包）----
+# 先编库，再编依赖它们的工具，顺序不能乱
+package/feeds/packages/ncurses|libncurses|required
+package/feeds/packages/ncurses|libncursesw|required
+package/feeds/packages/ncurses|terminfo|required
+package/feeds/packages/libpcap|libpcap1|required
+package/feeds/telephony/sngrep|sngrep|required
+package/feeds/packages/iftop|iftop|required
+package/feeds/packages/iptraf-ng|iptraf-ng|required
+package/feeds/packages/darkstat|darkstat|required
+
+# ---- 带宽统计 + 三方界面 / 翻译 ----
+package/feeds/packages/nlbwmon|nlbwmon|required
+package/feeds/luci/luci-app-nlbwmon|luci-app-nlbwmon|required
+package/feeds/luci/luci-app-nlbwmon|luci-i18n-nlbwmon-zh-cn|required
