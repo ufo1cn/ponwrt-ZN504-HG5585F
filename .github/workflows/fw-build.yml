@@ -722,6 +722,10 @@ jobs:
           ko=$(find build_dir/target-*/linux-*/ -name '*.ko' -print 2>/dev/null | head -n1 || true)
           ver=""
           [ -n "$ko" ] && ver=$(modinfo -F vermagic "$ko" 2>/dev/null | head -n1 || true)
+          # 内核配置指纹：与 OpenWrt 的 LINUX_VERMAGIC 同算法（.config.set 里所有 =y/=m 行排序后 md5）。
+          # kernel 包版本就是 6.18.60~<该值>-r1，kmod apk 的依赖串认的就是它；
+          # 这里把它写进 build-info，作为“包流程必须与固件同源”的唯一比对基准。
+          khash=$(grep '=[ym]' build_dir/target-*/linux-*/.config.set 2>/dev/null | LC_ALL=C sort | md5sum | awk '{print $1}' || true)
           pub=$(sha256sum public-key.pem 2>/dev/null | awk '{print $1}' || true)
           {
             echo "device=${{ inputs.device_list }}"
@@ -732,6 +736,7 @@ jobs:
             echo "config_an7581_sha256=$(sha256sum configs/an7581.config | awk '{print $1}')"
             echo "config_release_sha256=$(sha256sum configs/release.config | awk '{print $1}')"
             echo "config_6_18_sha256=$(sha256sum target/linux/airoha/an7581/config-6.18 | awk '{print $1}')"
+            echo "kernel_config_hash=${khash:-unknown}"
             echo "apk_pubkey_sha256=${pub:-none}"
             echo "apk_repo_dir=ponwrt-k${KVER}"
             echo "run=${{ github.run_number }}"
@@ -758,6 +763,11 @@ jobs:
           mkdir -p /tmp/apkmeta/meta
           cp -f output/build-info.txt "/tmp/apkmeta/meta/firmware-k${KVER}-$(git rev-parse --short HEAD).txt"
           cp -f output/build-info.txt /tmp/apkmeta/meta/latest.txt
+          # 单一事实来源：把本次装配出来的 .config 与解析后的内核 .config.set 一起放上基线，
+          # 包流程（incremental/legacy/extra）只许继承或比对，不许自己另造一套内核配置。
+          cp -f .config "/tmp/apkmeta/meta/config-${{ inputs.label }}.txt" 2>/dev/null || true
+          kcfg=$(ls build_dir/target-*/linux-*/.config.set 2>/dev/null | head -n1 || true)
+          [ -n "$kcfg" ] && { cp -f "$kcfg" "/tmp/apkmeta/meta/kconfig-${{ inputs.label }}.txt" || true; }
           python3 - "output/build-info.txt" "$KVER" "${{ inputs.device_list }}" > /tmp/apkmeta/meta/firmware.json <<'PY'
           import json,sys
           src,kver,dev=sys.argv[1],sys.argv[2],sys.argv[3]
