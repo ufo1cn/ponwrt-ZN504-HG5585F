@@ -460,6 +460,31 @@ jobs:
             fi
           done < "$manifest"
 
+          # ------------------------------------------------------------------
+          # 收集本次编译产出的**全部** apk，不再按 only 白名单丢弃：
+          # bin/packages 在每轮 run 里从空开始（缓存只存 build_dir/staging_dir，
+          # 不含 bin/），所以这里的每个 apk 都是本轮 make 编出来的——包括
+          # make 自动拉起来编的依赖包（libnl-core/libnl-genl、libtirpc 等）。
+          # 按 only 过滤会把依赖漏掉，设备上 apk add 时就缺包；这里全收。
+          # 只排除 host 工具目录（bin/packages/*/host 之类），那不是设备包。
+          # ------------------------------------------------------------------
+          mkdir -p output
+          n_collect=0
+          collect_list=$(find bin/packages -type f -name '*.apk' -not -path '*/host/*' 2>/dev/null | sort || true)
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if cp -f "$f" output/; then
+              n_collect=$((n_collect+1))
+            else
+              echo "::error::收集 apk 失败：$f"; fail=1
+            fi
+          done <<< "$collect_list"
+          echo ">>> 本次收集 apk 共 ${n_collect} 个（output/）"
+          ls -1 output/*.apk 2>/dev/null | sed 's#.*/##' | sed 's/^/    /' || true
+          {
+            echo ""
+            echo "收集 apk ${n_collect} 个（不按 only 过滤）"
+          } >> build_log/package-summary.txt
           {
             echo "# pon-userspace 逐包结果（${{ inputs.device }}）"
             echo "$summary"
