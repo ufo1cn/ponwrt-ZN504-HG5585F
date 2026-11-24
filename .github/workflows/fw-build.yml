@@ -344,8 +344,9 @@ jobs:
                 || { echo "::error::usb 能力已启用，但 .config 里缺 ${s}"; exit 1; }
             done
             echo ">>> usb 能力：USB 核心栈已选中"
-            # U 盘自动挂载依赖：busybox blkid 认得这些卷 + 镜像里带 block-mount
-            for s in CONFIG_BUSYBOX_CONFIG_VOLUMEID \
+            # U 盘自动挂载依赖：busybox blkid 认盘并能输出 TYPE + 镜像里带 block-mount
+            for s in CONFIG_BUSYBOX_CONFIG_BLKID \
+                     CONFIG_BUSYBOX_CONFIG_FEATURE_BLKID_TYPE \
                      CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_FAT \
                      CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_EXT \
                      CONFIG_BUSYBOX_CONFIG_FEATURE_VOLUMEID_EXFAT \
