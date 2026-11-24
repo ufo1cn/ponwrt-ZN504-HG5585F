@@ -1,27 +1,121 @@
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
-START=98
-STOP=01
+START=95
+STOP=05
+
+load_cfg() {
+	config_load btsp
+	config_get ENABLE main enable '0'
+	config_get MAC main mac ''
+	config_get CHANNEL main channel '1'
+	config_get DEV main dev '/dev/rfcomm0'
+	config_get AUTOPAIR main autopair '1'
+}
+
+have_tools() {
+	command -v rfcomm >/dev/null 2>&1 || {
+		echo "btsp: 缺 rfcomm（需要安装 bluez-utils）" >&2
+		return 1
+	}
+	[ -e /sys/class/bluetooth ] || modprobe bluetooth 2>/dev/null
+	[ -d /sys/class/bluetooth ] || {
+		echo "btsp: 缺蓝牙子系统（需要安装 kmod-bluetooth 并加载）" >&2
+		return 1
+	}
+	return 0
+}
+
+pair_if_needed() {
+	[ "$AUTOPAIR" = "1" ] || return 0
+	command -v bluetoothctl >/dev/null 2>&1 || return 0
+	bluetoothctl info "$MAC" 2>/dev/null | grep -q "Paired: yes" && return 0
+	bluetoothctl --timeout 20 pair "$MAC" >/dev/null 2>&1
+	bluetoothctl trust "$MAC" >/dev/null 2>&1
+	return 0
+}
 
 start_service() {
-    config_load btsp
-    config_get enable main enable '0'
-    config_get mac main mac
-    config_get baud main baud '9600'
-    config_get port main port '5001'
-    [ "$enable" != "1" ] && return 0
+	load_cfg
+	[ "$ENABLE" = "1" ] || return 0
+	[ -n "$MAC" ] || {
+		echo "btsp: mac 为空，跳过绑定" >&2
+		return 0
+	}
+	have_tools || return 1
 
-    procd_open_instance
-    procd_set_param command /usr/bin/btsp
-    procd_append_param command -m "$mac"
-    procd_append_param command -b "$baud"
-    procd_append_param command -p "$port"
-    procd_set_param respawn
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
+	# 先清掉残留绑定，避免 rfcomm bind 因设备已存在而失败
+	rfcomm release "$DEV" 2>/dev/null
+
+	pair_if_needed
+
+	rfcomm bind "$DEV" "$MAC" "$CHANNEL" || {
+		echo "btsp: rfcomm bind $DEV <- $MAC ch$CHANNEL 失败" >&2
+		return 1
+	}
+	echo "btsp: $DEV <- $MAC ch$CHANNEL 已绑定（Ser2net 填 $DEV 即可对外提供 TCP）" >&2
+}
+
+stop_service() {
+	load_cfg
+	rfcomm release "$DEV" 2>/dev/null
+	pkill -f "rfcomm bind $DEV" 2>/dev/null
 }
 
 service_triggers() {
-    procd_add_reload_trigger "btsp"
+	procd_add_reload_trigger "btsp"
+}
+
+reload_service() {
+	stop_service
+	start_service
+}
+
+# 手动动作：/etc/init.d/btsp scan|pair <MAC>|bind|release|status
+extra_command "scan" "扫描附近蓝牙设备（约 6 秒）"
+extra_command "pair" "配对并信任指定 MAC：pair <MAC>"
+extra_command "bind" "手动绑定：bind <MAC> [channel]"
+extra_command "release" "释放 rfcomm 绑定"
+extra_command "btstatus" "查看当前绑定与已配对设备"
+
+scan() {
+	local LOG=/tmp/btsp-scan.log
+	bluetoothctl --timeout 8 scan on >"$LOG" 2>&1 &
+	sleep 7
+	bluetoothctl devices
+	bluetoothctl --timeout 2 scan off >/dev/null 2>&1
+	echo "--- 原始日志：$LOG ---"
+}
+
+pair() {
+	[ -n "$1" ] || {
+		echo "用法: /etc/init.d/btsp pair <MAC>"
+		return 1
+	}
+	bluetoothctl --timeout 20 pair "$1"
+	bluetoothctl trust "$1"
+}
+
+bind_dev() {
+	[ -n "$1" ] || {
+		echo "用法: /etc/init.d/btsp bind <MAC> [channel]"
+		return 1
+	}
+	load_cfg
+	CHANNEL="${2:-$CHANNEL}"
+	rfcomm release "$DEV" 2>/dev/null
+	rfcomm bind "$DEV" "$1" "$CHANNEL" && echo "btsp: $DEV <- $1 ch$CHANNEL"
+}
+
+release_dev() {
+	load_cfg
+	rfcomm release "$DEV" 2>/dev/null && echo "btsp: $DEV 已释放"
+}
+
+btstatus() {
+	load_cfg
+	echo "enable=$ENABLE mac=${MAC:-<空>} channel=$CHANNEL dev=$DEV autopair=$AUTOPAIR"
+	echo "--- rfcomm -a ---"
+	rfcomm -a 2>/dev/null
+	echo "--- bluetoothctl devices Paired ---"
+	bluetoothctl devices Paired 2>/dev/null
 }

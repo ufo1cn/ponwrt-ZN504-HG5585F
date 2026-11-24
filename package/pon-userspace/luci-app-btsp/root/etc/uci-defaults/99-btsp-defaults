@@ -1,0 +1,17 @@
+#!/bin/sh
+# 把旧版 btsp 配置（enable/mac/baud/port）迁移到 rfcomm 版（enable/mac/channel/dev/autopair）。
+# 幂等：已有键一律不动；旧版独有的 baud/port 删除（TCP 端口改由 Ser2net 管）。
+
+uci -q get btsp.main >/dev/null || uci set btsp.main=btsp
+
+for kv in enable:'0' channel:'1' dev:'/dev/rfcomm0' autopair:'1' mac:''; do
+	key="${kv%%:*}"
+	val="${kv#*:}"
+	uci -q get "btsp.main.$key" >/dev/null || uci set "btsp.main.$key=$val"
+done
+
+uci -q delete btsp.main.baud
+uci -q delete btsp.main.port
+uci commit btsp
+
+exit 0
