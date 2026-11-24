@@ -403,6 +403,16 @@ jobs:
           done < "$manifest"
           done
 
+          # 本次编译产出的 apk 全部收集（不再只收 only 名单里的）：
+          # make 自动拉起来编的依赖包也在 bin/packages 里，按 only 过滤会丢依赖
+          n_extra=0
+          collect_list=$(find bin/packages bin/targets -type f -name '*.apk' -not -path '*/host/*' 2>/dev/null | sort || true)
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if cp -f "$f" output/ 2>/dev/null; then n_extra=$((n_extra+1)); fi
+          done <<< "$collect_list"
+          echo ">>> 收集 apk 共 ${n_extra} 个（含依赖，output/）"
+
           {
             echo "# 独立包逐包结果（${{ inputs.device }} / scope=$scope / mihomo=${{ inputs.mihomo }}）"
             echo -e "$summary"

@@ -509,20 +509,20 @@ jobs:
             find bin/targets/airoha/an7581 -maxdepth 1 -name '*sysupgrade*.itb' 2>/dev/null | head -n 20
           fi
 
-      - name: Collect repo apks (kmod + iptv 上层)
+      - name: Collect repo apks (all compiled, not just kmod)
         if: success()
         run: |
           set -uo pipefail
           rm -rf kmods && mkdir -p kmods
+          # 口径：本次构建编出来的 apk 全部收集，不按包名丢弃（"没编译的除外"）。
           # kmod 一律由本工作流编译（与固件同一次构建、同一棵树），
           # 三条包工作流不再编 kmod，避免 ABI 漂移与重复构建。
-          # iptv 的 kmod 与其上层（luci-app / i18n）成对收集，版本天然一致。
-          find bin/packages bin/targets -type f \
-            \( -name 'kmod-*.apk' -o -name 'luci-app-iptv-*.apk' -o -name 'luci-i18n-iptv-*.apk' \) \
+          # 排除 host 工具目录（那里不是设备包）。
+          find bin/packages bin/targets -type f -name '*.apk' -not -path '*/host/*' \
             -exec cp -f {} kmods/ \; 2>/dev/null || true
           n=$(ls -1 kmods/*.apk 2>/dev/null | wc -l)
-          echo ">>> 收集到 apk：$n 个"
-          ls -1 kmods 2>/dev/null | head -n 40 || true
+          echo ">>> 收集到 apk：$n 个（本次编译产出的全部）"
+          ls -1 kmods 2>/dev/null | head -n 60 || true
 
           # 期望清单硬校验：少一个就失败，不允许静默少包
           miss=0
