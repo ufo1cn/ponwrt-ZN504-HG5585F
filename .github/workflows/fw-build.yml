@@ -294,6 +294,31 @@ jobs:
           echo ">>> 机型锁定完成（之后不再 defconfig）"
 
           # ------------------------------------------------------------------
+          # btrfs：只出 apk、不进镜像（体积考虑）。
+          # 实测（run 45366722990）：
+          #   只写 CONFIG_PACKAGE_kmod-fs-btrfs=m  → kconfig 清回 not set（generic config-6.18 里
+          #     CONFIG_BTRFS_FS 是 not set，包拿不到内核符号就不成立）；
+          #   再写 CONFIG_KERNEL_BTRFS_FS=m        → 包被默认成 =y（连带 8 个依赖 kmod 也 =y 烘进镜像）。
+          # 因此 defconfig 之后强制把它们全部回写成 =m：内核仍编 btrfs.ko（进 apk），
+          # 但包和依赖都不安装进 rootfs。此处位于"不再 defconfig"之后，写值会被构建直接采用。
+          # ------------------------------------------------------------------
+          for s in CONFIG_KERNEL_BTRFS_FS \
+                   CONFIG_PACKAGE_kmod-fs-btrfs \
+                   CONFIG_PACKAGE_kmod-lib-lzo \
+                   CONFIG_PACKAGE_kmod-lib-zlib-inflate \
+                   CONFIG_PACKAGE_kmod-lib-zlib-deflate \
+                   CONFIG_PACKAGE_kmod-lib-raid6 \
+                   CONFIG_PACKAGE_kmod-lib-xor \
+                   CONFIG_PACKAGE_kmod-lib-zstd \
+                   CONFIG_PACKAGE_kmod-lib-xxhash \
+                   CONFIG_PACKAGE_kmod-crypto-blake2b \
+                   CONFIG_PACKAGE_kmod-crypto-xxhash; do
+            sed -i "/^${s}=/d; /^# ${s} is not set/d" .config
+            printf '%s=m\n' "$s" >> .config
+          done
+          echo ">>> btrfs 归位：kmod-fs-btrfs 及依赖一律 =m（只出 apk，不进镜像）"
+
+          # ------------------------------------------------------------------
           # bake_usb=true：USB 驱动按 =y 烘焙进镜像（旧 USB 固件的做法，插上即用）。
           # 只对 .config 里真实存在（kconfig 可见）的符号做改写；隐藏包/条件包
           # （HIDDEN、@USE_XXX）无法用 CONFIG_PACKAGE_ 选择，逐个列出到日志，
