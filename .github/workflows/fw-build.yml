@@ -116,6 +116,33 @@ jobs:
             qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
             uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
 
+      # 内核树缓存（build_dir 里的 host/toolchain/linux）。
+      #
+      #  为什么要单独缓存这三段：toolchain(~10min) + 内核(~20min) 占了整个固件
+      #  构建的大头，而它们与"选装哪些用户态包"无关。命中后 make 只做依赖检查
+      #  与 install，直接从 30min 掉到 3-5min。
+      #
+      #  为什么不缓存 staging_dir/target-* 与 bin/：那两层带 package 的 stamp。
+      #  只恢复 stamp 不恢复同名 apk，make 会认为已编好而跳过，Collect 就收不到
+      #  包 —— 这属于静默丢包，绝不能靠缓存加速把它引进来。
+      #  三个 label 各自精确 key，restore 时依次回退，最后一条 ponwrt-fwtree-
+      #  允许 usb / usb-wifi / plain 互相借用（内核差异部分 make 会自动重编）。
+      - name: Restore kernel/toolchain build tree
+        if: inputs.cache_mode != '不使用缓存'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build_dir/host
+            build_dir/toolchain-*
+            build_dir/target-*/linux-*
+            staging_dir/host
+            staging_dir/toolchain-*
+          key: ponwrt-fwtree-${{ inputs.label }}-${{ hashFiles('configs/**/*.config', 'configs/device-features.txt', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default') }}-${{ github.sha }}
+          restore-keys: |
+            ponwrt-fwtree-${{ inputs.label }}-${{ hashFiles('configs/**/*.config', 'configs/device-features.txt', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default') }}-
+            ponwrt-fwtree-${{ inputs.label }}-
+            ponwrt-fwtree-
+
       # dl（源码包）缓存：actions/cache@v4 的 post 保存只在 job 成功时执行，
       # 固件这一步经常红 → dl 从来没落盘。这里只做 restore，保存放在 job 末尾单独做。
       - name: Restore downloads cache
@@ -751,6 +778,21 @@ jobs:
           done
           echo "::warning::基线推送失败（不影响固件产物，下一轮巡检会补）"
 
+
+      # 内核树缓存保存。失败也存（always）：半成品 build_dir 与 stamp 是一致
+      # 的，下轮 make 会续着编，比从零开始快。
+      - name: Save kernel/toolchain build tree
+        if: always() && inputs.cache_mode != '不使用缓存'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build_dir/host
+            build_dir/toolchain-*
+            build_dir/target-*/linux-*
+            staging_dir/host
+            staging_dir/toolchain-*
+          key: ponwrt-fwtree-${{ inputs.label }}-${{ hashFiles('configs/**/*.config', 'configs/device-features.txt', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default') }}-${{ github.sha }}
 
       - name: Save downloads cache
         if: always() && inputs.cache_mode != '不使用缓存'
