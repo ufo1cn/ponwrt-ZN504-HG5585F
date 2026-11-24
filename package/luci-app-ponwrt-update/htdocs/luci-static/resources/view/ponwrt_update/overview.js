@@ -27,9 +27,18 @@ function fmtSize(n) {
 }
 
 function kv(label, value) {
+	var field = E('div', { 'class': 'cbi-value-field' });
+
+	if (value == null || value === '')
+		field.textContent = '—';
+	else if (typeof value === 'object' && value.nodeType)
+		field.appendChild(value);          // 控件（select/input/button…）要挂节点，不能 String()
+	else
+		field.textContent = String(value);
+
 	return E('div', { 'class': 'cbi-value' }, [
 		E('label', { 'class': 'cbi-value-title' }, label),
-		E('div', { 'class': 'cbi-value-field' }, value == null || value === '' ? '—' : String(value))
+		field
 	]);
 }
 

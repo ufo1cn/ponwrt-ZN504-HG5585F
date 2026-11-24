@@ -14,8 +14,10 @@
 #   proxy        显式 --proxy <proxy>（rpcd/LuCI 进程环境里没有 http_proxy，必须显式传）
 #   transparent  透明代理（TUN / nftables redir 已生效），这里同样按直连发请求
 #
-set -u
-
+# 注意：这里不能用 set -u。libubox 的 jshn.sh 内部会引用未定义的 JSON_PREFIX
+# （json_init -> _json_get_var），在 set -u 下会直接 "JSON_PREFIX: parameter not set"
+# 退出，rpcd 拿不到任何输出，LuCI 就表现成 "Command failed: No response"。
+# 需要防未定义变量的地方本文件已逐个用 ${x:-} 兜住。
 JSHN=/usr/share/libubox/jshn.sh
 VF=/etc/ponwrt-version
 STATE=/tmp/ponwrt-update.state
