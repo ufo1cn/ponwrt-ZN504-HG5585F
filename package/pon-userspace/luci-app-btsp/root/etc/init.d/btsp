@@ -1,121 +1,183 @@
 #!/bin/sh /etc/rc.common
-USE_PROCD=1
+# BTSP：把蓝牙 SPP 串口设备绑定成 /dev/rfcomm0，TCP 对外由 Ser2net 负责。
+# 这里没有常驻进程（rfcomm bind 绑完就退出），所以不用 procd，靠普通 rc 脚本的 start/stop。
+
 START=95
 STOP=05
 
+LOG=/tmp/btsp-scan.log
+
 load_cfg() {
 	config_load btsp
-	config_get ENABLE main enable '0'
-	config_get MAC main mac ''
-	config_get CHANNEL main channel '1'
-	config_get DEV main dev '/dev/rfcomm0'
+	config_get ENABLE   main enable   '0'
+	config_get MAC      main mac      ''
+	config_get CHANNEL  main channel  '1'
+	config_get DEV      main dev      '/dev/rfcomm0'
 	config_get AUTOPAIR main autopair '1'
 }
 
-have_tools() {
-	command -v rfcomm >/dev/null 2>&1 || {
-		echo "btsp: 缺 rfcomm（需要安装 bluez-utils）" >&2
-		return 1
-	}
-	[ -e /sys/class/bluetooth ] || modprobe bluetooth 2>/dev/null
-	[ -d /sys/class/bluetooth ] || {
-		echo "btsp: 缺蓝牙子系统（需要安装 kmod-bluetooth 并加载）" >&2
-		return 1
-	}
+bt_daemon_up() {
+	pidof bluetoothd >/dev/null 2>&1
+}
+
+# 蓝牙子系统 + bluetoothd 就位；缺 bluetoothd 时尝试拉起（bluez-daemon 的服务名是 bluetoothd）
+ensure_bt() {
+	modprobe bluetooth 2>/dev/null
+	modprobe rfcomm 2>/dev/null
+	[ -d /sys/class/bluetooth ] || return 1
+	if ! bt_daemon_up; then
+		[ -x /etc/init.d/bluetoothd ] && /etc/init.d/bluetoothd start >/dev/null 2>&1
+		sleep 2
+	fi
+	bt_daemon_up || return 1
+	# 适配器默认可能没上电（main.conf 里 AutoEnable 不一定开）
+	if command -v bluetoothctl >/dev/null 2>&1; then
+		bluetoothctl power on >/dev/null 2>&1
+	fi
 	return 0
 }
 
-pair_if_needed() {
-	[ "$AUTOPAIR" = "1" ] || return 0
-	command -v bluetoothctl >/dev/null 2>&1 || return 0
-	bluetoothctl info "$MAC" 2>/dev/null | grep -q "Paired: yes" && return 0
-	bluetoothctl --timeout 20 pair "$MAC" >/dev/null 2>&1
-	bluetoothctl trust "$MAC" >/dev/null 2>&1
+# 已配对就直接返回 0；没配对就试着 pair + trust。老模块（HC-05 固定 PIN）大概率要靠交互配对。
+pair_mac() {
+	local mac="$1"
+	command -v bluetoothctl >/dev/null 2>&1 || return 1
+	bt_daemon_up || return 1
+	bluetoothctl info "$mac" 2>/dev/null | grep -q 'Paired: yes' && return 0
+	printf 'agent NoInputNoOutput\npair %s\n' "$mac" | bluetoothctl --timeout 15 >/dev/null 2>&1
+	bluetoothctl info "$mac" 2>/dev/null | grep -q 'Paired: yes' || return 1
+	bluetoothctl trust "$mac" >/dev/null 2>&1
 	return 0
 }
 
-start_service() {
+start() {
 	load_cfg
 	[ "$ENABLE" = "1" ] || return 0
 	[ -n "$MAC" ] || {
 		echo "btsp: mac 为空，跳过绑定" >&2
 		return 0
 	}
-	have_tools || return 1
+	command -v rfcomm >/dev/null 2>&1 || {
+		echo "btsp: 缺 rfcomm（需要 bluez-utils）" >&2
+		return 1
+	}
+	ensure_bt || {
+		echo "btsp: 蓝牙子系统不可用（kmod-bluetooth 没加载或 bluetoothd 起不来）" >&2
+		return 1
+	}
 
-	# 先清掉残留绑定，避免 rfcomm bind 因设备已存在而失败
+	# 先 releases 掉残留绑定，避免 rfcomm bind 因设备已存在而失败
 	rfcomm release "$DEV" 2>/dev/null
 
-	pair_if_needed
+	if [ "$AUTOPAIR" = "1" ]; then
+		pair_mac "$MAC" || echo "btsp: $MAC 自动配对没成功，先照常绑定（能用 bluetoothctl 手动配一次）" >&2
+	fi
 
 	rfcomm bind "$DEV" "$MAC" "$CHANNEL" || {
 		echo "btsp: rfcomm bind $DEV <- $MAC ch$CHANNEL 失败" >&2
 		return 1
 	}
 	echo "btsp: $DEV <- $MAC ch$CHANNEL 已绑定（Ser2net 填 $DEV 即可对外提供 TCP）" >&2
+	return 0
 }
 
-stop_service() {
+stop() {
 	load_cfg
-	rfcomm release "$DEV" 2>/dev/null
-	pkill -f "rfcomm bind $DEV" 2>/dev/null
+	rfcomm release "$DEV" 2>/dev/null && echo "btsp: $DEV 已释放" >&2
+	return 0
 }
 
-service_triggers() {
-	procd_add_reload_trigger "btsp"
+reload() {
+	stop
+	start
 }
 
-reload_service() {
-	stop_service
-	start_service
-}
-
-# 手动动作：/etc/init.d/btsp scan|pair <MAC>|bind|release|status
-extra_command "scan" "扫描附近蓝牙设备（约 6 秒）"
+# 手动动作
+extra_command "scan" "扫描附近蓝牙设备（约 7 秒，日志在 $LOG）"
 extra_command "pair" "配对并信任指定 MAC：pair <MAC>"
 extra_command "bind" "手动绑定：bind <MAC> [channel]"
 extra_command "release" "释放 rfcomm 绑定"
 extra_command "btstatus" "查看当前绑定与已配对设备"
+extra_command "status" "同 btstatus"
 
 scan() {
-	local LOG=/tmp/btsp-scan.log
+	command -v bluetoothctl >/dev/null 2>&1 || {
+		echo "btsp: 缺 bluetoothctl（需要 bluez-utils）" >&2
+		return 1
+	}
+	ensure_bt || {
+		echo "btsp: 蓝牙不可用，扫描跳过" >&2
+		return 1
+	}
+	: > "$LOG"
 	bluetoothctl --timeout 8 scan on >"$LOG" 2>&1 &
+	SCAN_PID=$!
 	sleep 7
-	bluetoothctl devices
-	bluetoothctl --timeout 2 scan off >/dev/null 2>&1
+	kill "$SCAN_PID" 2>/dev/null
+	bluetoothctl --timeout 3 scan off >/dev/null 2>&1
+	echo "--- 发现 ---"
+	bluetoothctl devices 2>/dev/null
 	echo "--- 原始日志：$LOG ---"
 }
 
 pair() {
 	[ -n "$1" ] || {
-		echo "用法: /etc/init.d/btsp pair <MAC>"
+		echo "用法: /etc/init.d/btsp pair <MAC>" >&2
 		return 1
 	}
-	bluetoothctl --timeout 20 pair "$1"
-	bluetoothctl trust "$1"
+	ensure_bt || {
+		echo "btsp: 蓝牙不可用" >&2
+		return 1
+	}
+	pair_mac "$1" || {
+		echo "btsp: 配对 $1 失败；HC-05 这类固定 PIN 模块需要在 SSH 里用 bluetoothctl 交互配对一次" >&2
+		return 1
+	}
+	echo "btsp: $1 已配对并 trust"
 }
 
-bind_dev() {
+bind() {
 	[ -n "$1" ] || {
-		echo "用法: /etc/init.d/btsp bind <MAC> [channel]"
+		echo "用法: /etc/init.d/btsp bind <MAC> [channel]" >&2
 		return 1
 	}
 	load_cfg
-	CHANNEL="${2:-$CHANNEL}"
+	local ch="${2:-$CHANNEL}"
 	rfcomm release "$DEV" 2>/dev/null
-	rfcomm bind "$DEV" "$1" "$CHANNEL" && echo "btsp: $DEV <- $1 ch$CHANNEL"
+	rfcomm bind "$DEV" "$1" "$ch" || {
+		echo "btsp: rfcomm bind $DEV <- $1 ch$ch 失败" >&2
+		return 1
+	}
+	echo "btsp: $DEV <- $1 ch$ch 已绑定"
 }
 
-release_dev() {
+release() {
 	load_cfg
-	rfcomm release "$DEV" 2>/dev/null && echo "btsp: $DEV 已释放"
+	if rfcomm release "$DEV" 2>/dev/null; then
+		echo "btsp: $DEV 已释放"
+	else
+		echo "btsp: $DEV 本来就没有绑定"
+	fi
 }
 
 btstatus() {
 	load_cfg
 	echo "enable=$ENABLE mac=${MAC:-<空>} channel=$CHANNEL dev=$DEV autopair=$AUTOPAIR"
+	echo "--- 适配器 ---"
+	if bt_daemon_up; then
+		bluetoothctl list 2>/dev/null
+	else
+		echo "bluetoothd 未运行"
+	fi
 	echo "--- rfcomm -a ---"
-	rfcomm -a 2>/dev/null
-	echo "--- bluetoothctl devices Paired ---"
-	bluetoothctl devices Paired 2>/dev/null
+	rfcomm -a 2>/dev/null || echo "（无输出）"
+	echo "--- 已配对设备 ---"
+	if bt_daemon_up; then
+		bluetoothctl devices Paired 2>/dev/null || echo "（无输出）"
+	else
+		echo "bluetoothd 未运行"
+	fi
+}
+
+status() {
+	btstatus
 }

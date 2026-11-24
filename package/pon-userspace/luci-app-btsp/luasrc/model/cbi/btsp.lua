@@ -48,9 +48,17 @@ end
 
 local notice = ""
 
+-- bluetoothd 没在跑时 bluetoothctl 会一直等，别让页面卡死
+local function bt_paired()
+    if sys.call("pidof bluetoothd >/dev/null 2>&1") ~= 0 then
+        return translate("bluetoothd 未运行")
+    end
+    return grab("bluetoothctl devices Paired")
+end
+
 local function status_html()
     local body = "rfcomm -a:\n" .. grab("rfcomm -a")
-        .. "\n\nbluetoothctl devices Paired:\n" .. grab("bluetoothctl devices Paired")
+        .. "\n\n已配对设备（bluetoothctl devices Paired）:\n" .. bt_paired()
     if fs.access("/tmp/btsp-scan.log") then
         body = body .. "\n\n扫描日志 /tmp/btsp-scan.log（最近 30 行）:\n"
             .. grab("tail -n 30 /tmp/btsp-scan.log")
@@ -103,17 +111,35 @@ function o.write(self, section)
     self.map.uci:commit("btsp")
     sys.exec("( /etc/init.d/btsp pair " .. mac .. " ) >/dev/null 2>&1")
     sys.exec("( /etc/init.d/btsp bind " .. mac .. " ) >/dev/null 2>&1")
+    if sys.call("bluetoothctl info " .. mac .. " 2>/dev/null | grep -q 'Paired: yes'") ~= 0 then
+        notice = translate("配对没成功（HC-05 这类固定 PIN 模块要在 SSH 里 bluetoothctl 手动配一次）；rfcomm 绑定已尝试执行")
+    end
     refresh()
 end
 
 o = s:option(Button, "_release", translate("解除绑定"))
 o.inputtitle = translate("解除绑定")
 o.inputstyle = "reset"
-o.description = translate("release 掉当前的 rfcomm 绑定（等价于停掉服务）")
+o.description = translate("release 掉当前的 rfcomm 绑定（不改「启用」开关）")
 function o.write()
     notice = ""
     sys.exec("( /etc/init.d/btsp release ) >/dev/null 2>&1")
     refresh()
+end
+
+-- 只改 uci 里的 enable 不会建/删 /etc/rc.d 的启动链接，保存时按变化顺手做掉
+local was_enabled = (m.uci:get("btsp", "main", "enable") == "1")
+m.on_after_commit = function()
+    local now = ((sys.exec("uci -q get btsp.main.enable 2>/dev/null") or ""):gsub("%s", "") == "1")
+    if now == was_enabled then return end
+    if now then
+        sys.call("/etc/init.d/btsp enable >/dev/null 2>&1")
+        sys.exec("( /etc/init.d/btsp restart ) >/dev/null 2>&1 &")
+    else
+        sys.call("/etc/init.d/btsp disable >/dev/null 2>&1")
+        sys.exec("( /etc/init.d/btsp stop ) >/dev/null 2>&1 &")
+    end
+    was_enabled = now
 end
 
 return m
