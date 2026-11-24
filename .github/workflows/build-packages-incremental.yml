@@ -569,26 +569,9 @@ jobs:
             staging_dir/host
           key: ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-${{ github.run_id }}
 
-      - name: Check source tree matches firmware baseline (informational)
+      - name: Enforce firmware baseline parity (hard gate)
         if: always()
-        run: |
-          set -uo pipefail
-          fw=$(grep '^firmware_kernel=' .ci-source-commit 2>/dev/null | cut -d= -f2 || true)
-          got=$(cat build_dir/target-*/linux-*/include/config/kernel.release 2>/dev/null | head -n1 || true)
-          echo ">>> 固件内核=${fw:-未知} 本树内核=${got:-未知}"
-          if [ -z "$fw" ] || [ "$fw" = "none" ]; then
-            echo "::warning::拿不到固件基线内核版本（apk-repo 还没有 meta/firmware.json），本次只记录不拦截"
-            exit 0
-          fi
-          if [ -z "$got" ]; then
-            echo "::warning::本 run 没编内核树（with_kernel=false），只记录基线 $fw"
-            exit 0
-          fi
-          if [ "$fw" != "$got" ]; then
-            # 本流程只编用户态包（kmod 由固件流程编），版本不一致只提示，不拦
-            echo "::warning::源码树内核 $got 与固件基线 $fw 不一致；用户态包不受影响，kmod 请用固件流程的产物"
-          fi
-          echo ">>> ABI 核对通过：$fw"
+        run: bash .github/scripts/check-fw-parity.sh
 
       - name: Stage host apk tool for the publish workflow
         if: always()
