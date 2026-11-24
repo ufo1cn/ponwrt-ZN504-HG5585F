@@ -373,8 +373,12 @@ jobs:
             grep -q '^CONFIG_PACKAGE_block-mount=y' .config \
               || { echo "::error::usb 能力已启用，但 block-mount 不是 =y（没有热插拔挂载脚本）"; exit 1; }
             # btrfs 只出 apk，禁止被烘进镜像（体积考虑）
-            grep -q '^CONFIG_PACKAGE_kmod-fs-btrfs=m' .config \
-              || { echo "::error::kmod-fs-btrfs 应为 =m（只出 apk，不进镜像）"; exit 1; }
+            if ! grep -q '^CONFIG_PACKAGE_kmod-fs-btrfs=m' .config; then
+              echo ">>> 诊断：.config 里的 btrfs / 依赖相关行"
+              grep -n -E 'BTRFS|kmod-lib-zstd|kmod-lib-xxhash|kmod-crypto-blake2b|kmod-crypto-xxhash|kmod-lib-raid6|kmod-lib-xor|kmod-lib-lzo' .config | sed 's/^/    /' || true
+              echo "::error::kmod-fs-btrfs 应为 =m（只出 apk，不进镜像）"
+              exit 1
+            fi
             echo ">>> usb 能力：blkid 识别 + 文件系统驱动 + block-mount 已进镜像"
           fi
           if has_cap wifi; then
