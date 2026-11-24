@@ -16,6 +16,6 @@
 #      - =y 的包（如 kmod-mt7915e）会进「每一台」机型的镜像，无法按机型分离。
 # ------------------------------------------------------------------------------
 
-fiberhome_hg5585f-ct|usb wifi
+fiberhome_hg5585f-ct|usb wifi bt
 fiberhome_hg5382a|
-nokia_xg-040g-md-ubi|usb
+nokia_xg-040g-md-ubi|usb bt
