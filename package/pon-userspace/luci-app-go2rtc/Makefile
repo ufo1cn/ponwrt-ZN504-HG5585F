@@ -5,12 +5,12 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-go2rtc
 PKG_VERSION:=1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=ufo1cn
 
 LUCI_TITLE:=LuCI support for go2rtc
-LUCI_DEPENDS:=+go2rtc
+LUCI_DEPENDS:=+go2rtc +luci-compat
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
