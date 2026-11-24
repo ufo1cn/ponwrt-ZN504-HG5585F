@@ -14,9 +14,10 @@ name: PonWrt firmware build (reusable)
 #       不再执行 defconfig）；
 #   4) 产物：上游 find 只匹配 zn504 / hg5585f-ct / hg5585f-cu，HG5382A 会被名字
 #      过滤静默丢弃；这里加上 *hg5382a* 并对目标机型做存在性硬校验；
-#   5) kmod 归属：所有 kmod 都在这里编——能力片段里 =m 的驱动，bake_usb=true 时
-#      改写成 =y 烘进镜像，否则只出 apk；configs/features/kmod-repo.config 里的
-#      kmod 保持 =m（只出 apk 不进镜像）。iptv 的 kmod 与其上层 luci-app-iptv /
+#   5) kmod 归属：所有 kmod 都在这里编。【统一内核】能力片段 + kmod-repo.config 里
+#      出现的每个 kmod 符号，无论本机型有无该硬件，都会在本机型内核里编出来（=m），
+#      因此三台机型的内核指纹一致、kmod 只有一份；机型能力只决定"装不装进 rootfs"
+#      （=y：usb 机 bake_usb=true、usb-wifi 的内置无线），=m 的 .ko 只进 apk 仓库。iptv 的 kmod 与其上层 luci-app-iptv /
 #      i18n 成对在此编译（树外 feed，feeds update 前注入），保证版本与 ABI 一致。
 #      产物收集到 kmods/ 并发布 kmods-<label>-r<run> 预发布，由 pkg-publish.yml
 #      搬进软件仓库；三条 build-packages-* 流程只编用户态包。
@@ -46,7 +47,7 @@ on:
         default: '使用缓存'
         type: string
       bake_usb:
-        description: 'USB 驱动是否烘焙进镜像：true = 全部 =y 进镜像（旧 USB 固件做法）；false = 只编成 apk 进仓库，设备上按需装（=m）'
+        description: 'USB 驱动是否装进 rootfs（插上即用）：true = usb 片段的 kmod 改成 =y 预装进镜像；false = 只出 apk，设备上按需装。注意：两种取值下 USB 驱动都会编进本机内核（统一指纹），差别只在镜像里装不装 .ko'
         required: false
         default: false
         type: boolean
@@ -300,6 +301,43 @@ jobs:
             echo ">>> kmod 仓库片段应用 $n_repo 个符号（=m：只编 apk，不进镜像），${n_repo_skip:-0} 个已烘进镜像跳过"
           fi
 
+          # ------------------------------------------------------------------
+          # 【统一内核】能力片段与 kmod 仓库清单里出现的所有 kmod，无论本机型有没有
+          # 这项硬件，都要在这一台的内核里编出来（=m）；机型能力只决定“装不装进 rootfs”。
+          #
+          # 依据：内核 .config 的差异来自“符号有没有被选中”，而不是“包写成 y 还是 m”。
+          # 只要符号被选中，三台机型编出的 vmlinux 与 vermagic 就一致；而 =m 的 .ko
+          # 只进 apk 仓库、不进镜像，所以硬件更少的那台既不加体积，也不会 probe——
+          # DTS 里 usb/pcie 默认 disabled，没有 platform/pci 设备，驱动 init 不做事。
+          # 收益：一个内核指纹、一份 kmod 集，装到任何一台都不会被 apk 的兼容校验拒。
+          #
+          # 只把“未选中/未设置”的符号升成 =m，绝不把已有 =y 降级（否则会把 usb-wifi
+          # 的内置无线驱动从镜像里拿掉）。=y 的升级仍由片段与 bake_usb 决定。
+          # ------------------------------------------------------------------
+          UNION_TMP=$(mktemp)
+          for f in configs/features/*.config; do
+            grep -E '^CONFIG_PACKAGE_kmod-[A-Za-z0-9_.+-]+=' "$f" 2>/dev/null \
+              | sed -E 's/=.*//' >> "$UNION_TMP" || true
+          done
+          sort -u "$UNION_TMP" -o "$UNION_TMP"
+          n_union=0; n_keep=0
+          while IFS= read -r sym; do
+            [ -n "$sym" ] || continue
+            if grep -q "^${sym}=y$" .config; then
+              n_keep=$((n_keep+1)); continue
+            fi
+            if grep -q "^${sym}=m$" .config; then
+              n_keep=$((n_keep+1)); continue
+            fi
+            sed -i "/^${sym}=/d; /^# ${sym} is not set/d" .config
+            printf '%s=m\n' "$sym" >> .config
+            n_union=$((n_union+1))
+          done < "$UNION_TMP"
+          echo ">>> 统一内核：清单内 $(wc -l < "$UNION_TMP") 个 kmod 全机型编出，$n_union 个新升为 =m，$n_keep 个已选中"
+          cp -f "$UNION_TMP" /tmp/universal-kmods.txt
+          echo "UNIVERSAL_KMODS=$(wc -l < "$UNION_TMP")" >> "$GITHUB_ENV"
+          rm -f "$UNION_TMP"
+
           # kconfig 解析：只此一次，之后不再 defconfig
           make defconfig
 
@@ -319,6 +357,24 @@ jobs:
               || { echo "::error::机型符号未落地: CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${d}=y"; exit 1; }
           done
           echo ">>> 机型锁定完成（之后不再 defconfig）"
+
+          # ------------------------------------------------------------------
+          # 统一内核落地核对：清单里的 kmod 必须被 kconfig 选中（=y 或 =m）。
+          # 依赖确实不满足、被清回 not set 的逐个列出（kconfig 不可选符号不算失败），
+          # 用来保证三台机型的内核符号集一致。
+          # ------------------------------------------------------------------
+          if [ -f /tmp/universal-kmods.txt ]; then
+            um_missing=""
+            while IFS= read -r s; do
+              [ -n "$s" ] || continue
+              grep -qE "^${s}=[ym]$" .config || um_missing="$um_missing $s"
+            done < /tmp/universal-kmods.txt
+            if [ -n "$um_missing" ]; then
+              echo "::warning::统一内核清单里这些符号未被选中（依赖不满足，三机型内核可能不一致）:$um_missing"
+            else
+              echo ">>> 统一内核落地：$(wc -l < /tmp/universal-kmods.txt) 个 kmod 符号全部被选中"
+            fi
+          fi
 
           # ------------------------------------------------------------------
           # btrfs：只出 apk、不进镜像（体积考虑）。
