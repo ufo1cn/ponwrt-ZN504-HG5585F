@@ -27,8 +27,10 @@ package/feeds/packages/dbus|dbus|required
 
 # ---- NFS 客户端用户态（内核 kmod 由 fw-build 出，这里只出 mount.nfs 等工具）----
 # 顺序：先编依赖库 libnl，再编 nfs-utils（DEPENDS: libtirpc libuuid libnl-core libnl-genl）
-package/feeds/packages/libnl|libnl-core|required
-package/feeds/packages/libnl|libnl-genl|required
+# libnl 是主仓内置包（package/libs/libnl），不在 packages feed 里，路径不能写 package/feeds/packages/libnl
+# （feed 里没有该目录，脚本会按“源码目录缺失”判 FAIL，而 libnl-core apk 其实已作为 nfs-utils 依赖编出来了）
+package/libs/libnl|libnl-core|required
+package/libs/libnl|libnl-genl|required
 package/feeds/packages/nfs-kernel-server|nfs-utils|required
 
 # ---- IPTV 组播转单播（feed 内包，纯用户态）----
