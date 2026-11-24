@@ -1,0 +1,98 @@
+#!/bin/sh
+# /usr/bin/audiorec-loop —— 录音循环：按配置分段录到 outdir，FLAC 可选。
+# 由 /etc/init.d/audiorec 通过 procd 拉起；停止时先杀 arecord 子进程再退出。
+
+. /lib/functions.sh
+
+PIDFILE=/var/run/audiorec.pid
+STATE=/tmp/audiorec-state
+LOGF=/tmp/audiorec.log
+
+AREC_PID=""
+
+log() {
+	logger -t audiorec "$*"
+	# 日志控制大小，避免 /tmp 里无限增长
+	if [ -f "$LOGF" ] && [ "$(wc -c <"$LOGF" 2>/dev/null || echo 0)" -gt 262144 ]; then
+		tail -n 400 "$LOGF" >"$LOGF.tmp" 2>/dev/null && mv "$LOGF.tmp" "$LOGF"
+	fi
+	echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOGF"
+}
+
+cleanup() {
+	[ -n "$AREC_PID" ] && kill "$AREC_PID" 2>/dev/null
+	echo "" >"$STATE"
+	rm -f "$PIDFILE"
+	exit 0
+}
+trap cleanup TERM INT
+
+echo $$ >"$PIDFILE"
+
+while :; do
+	DEV="plughw:1,0"; RATE=16000; CH=1; FMT=flac; SEG=600
+	OUTDIR=/mnt/sda1/rec; KEEP=7
+	config_load audiorec
+	config_get DEV    main dev       'plughw:1,0'
+	config_get RATE   main rate      '16000'
+	config_get CH     main channels  '1'
+	config_get FMT    main format    'flac'
+	config_get SEG    main segment   '600'
+	config_get OUTDIR main outdir    '/mnt/sda1/rec'
+	config_get KEEP   main keep_days '7'
+
+	case "$RATE" in 8000|16000|44100|48000) ;; *) RATE=16000 ;; esac
+	case "$CH" in 1|2) ;; *) CH=1 ;; esac
+	case "$FMT" in wav|flac) ;; *) FMT=flac ;; esac
+	[ "$SEG" -ge 30 ] 2>/dev/null || SEG=600
+	[ "$KEEP" -ge 0 ] 2>/dev/null || KEEP=7
+
+	[ -n "$OUTDIR" ] || OUTDIR=/mnt/sda1/rec
+	mkdir -p "$OUTDIR" 2>/dev/null
+	if [ ! -d "$OUTDIR" ] || [ ! -w "$OUTDIR" ]; then
+		log "保存目录不可写：$OUTDIR（30s 后重试）"
+		sleep 30
+		continue
+	fi
+
+	TS=$(date +%Y%m%d-%H%M%S)
+	WAV="$OUTDIR/.rec-$TS.part.wav"
+	echo "$WAV" >"$STATE"
+
+	arecord -q -D "$DEV" -f S16_LE -r "$RATE" -c "$CH" -t wav --duration "$SEG" "$WAV" >>"$LOGF" 2>&1 &
+	AREC_PID=$!
+	wait "$AREC_PID"
+	rc=$?
+	AREC_PID=""
+	echo "" >"$STATE"
+
+	if [ "$rc" -ne 0 ] || [ ! -s "$WAV" ]; then
+		log "采集失败 rc=$rc（$DEV ${RATE}Hz/${CH}ch）"
+		rm -f "$WAV"
+		sleep 5
+		continue
+	fi
+
+	case "$FMT" in
+		flac)
+			if ffmpeg -hide_banner -loglevel error -y -i "$WAV" \
+				-c:a flac -compression_level 5 "$OUTDIR/rec-$TS.flac" >>"$LOGF" 2>&1; then
+				rm -f "$WAV"
+				log "本段落盘：rec-$TS.flac"
+			else
+				log "flac 转码失败，保留 wav"
+				mv "$WAV" "$OUTDIR/rec-$TS.wav"
+			fi
+			;;
+		*)
+			mv "$WAV" "$OUTDIR/rec-$TS.wav"
+			log "本段落盘：rec-$TS.wav"
+			;;
+	esac
+
+	if [ "$KEEP" -gt 0 ]; then
+		find "$OUTDIR" -maxdepth 1 -type f -name 'rec-*' -mtime +"$KEEP" -delete 2>/dev/null
+		# 异常中断留下的半成品（.rec-*.part.wav）超过 1 天清掉
+		find "$OUTDIR" -maxdepth 1 -type f -name '.rec-*.part.wav' -mtime +1 -delete 2>/dev/null
+	fi
+done

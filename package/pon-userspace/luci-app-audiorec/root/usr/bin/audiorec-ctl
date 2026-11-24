@@ -1,0 +1,64 @@
+#!/bin/sh
+# /usr/bin/audiorec-ctl —— 录音控制小工具
+#   devices        列出音频设备（arecord -l）
+#   test [秒]      按当前参数试录到 /tmp/audiorec-test.wav
+#   start|stop     启停录音（等价 /etc/init.d/audiorec start|stop）
+#   status         进程/当前文件/最近文件
+#   files          最近 20 个录音文件
+
+. /lib/functions.sh
+
+cfg() {
+	config_load audiorec
+	config_get DEV    main dev       'plughw:1,0'
+	config_get RATE   main rate      '16000'
+	config_get CH     main channels  '1'
+	config_get OUTDIR main outdir    '/mnt/sda1/rec'
+}
+
+case "$1" in
+	devices)
+		arecord -l 2>&1
+		;;
+	test)
+		SEC="${2:-5}"
+		case "$SEC" in ''|*[!0-9]*) SEC=5 ;; esac
+		cfg
+		command -v arecord >/dev/null 2>&1 || {
+			echo "缺 arecord（需要 alsa-utils）" >&2
+			exit 1
+		}
+		rm -f /tmp/audiorec-test.wav
+		if arecord -q -D "$DEV" -f S16_LE -r "$RATE" -c "$CH" -t wav --duration "$SEC" /tmp/audiorec-test.wav 2>&1; then
+			ls -l /tmp/audiorec-test.wav 2>/dev/null
+		else
+			echo "试录失败：检查设备名（arecord -l）与 USB 声卡是否插好" >&2
+			exit 1
+		fi
+		;;
+	start)
+		/etc/init.d/audiorec start
+		;;
+	stop)
+		/etc/init.d/audiorec stop
+		;;
+	files)
+		cfg
+		ls -lt "$OUTDIR" 2>/dev/null | head -n 20 || echo "目录不存在：$OUTDIR"
+		;;
+	status)
+		if [ -f /var/run/audiorec.pid ] && kill -0 "$(cat /var/run/audiorec.pid)" 2>/dev/null; then
+			echo "录音进程：运行中（pid $(cat /var/run/audiorec.pid)）"
+			cat /tmp/audiorec-state 2>/dev/null
+		else
+			echo "录音进程：已停止"
+		fi
+		cfg
+		echo "保存目录：$OUTDIR"
+		ls -lt "$OUTDIR" 2>/dev/null | head -n 6
+		;;
+	*)
+		echo "用法: $0 {devices|test [秒]|start|stop|status|files}" >&2
+		exit 1
+		;;
+esac
