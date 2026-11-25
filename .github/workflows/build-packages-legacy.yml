@@ -126,8 +126,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${APK_SIGNING_PRIVATE_KEY:-}" ]; then
-            echo "::warning::仓库未配置 APK_SIGNING_PRIVATE_KEY，本次用 run 内临时密钥（跨 run 不可互信）"
-            exit 0
+            echo "::error::仓库未配置 APK_SIGNING_PRIVATE_KEY（全仓库固定同一把私钥），本次构建不能继续"
+            exit 1
           fi
           printf '%s\n' "$APK_SIGNING_PRIVATE_KEY" > private-key.pem
           chmod 600 private-key.pem
