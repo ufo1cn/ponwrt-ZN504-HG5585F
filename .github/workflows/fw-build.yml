@@ -1306,12 +1306,37 @@ jobs:
           fi
           tag="kmods-${{ inputs.label }}-r${{ github.run_number }}"
           kver=$(awk -F= '/^kernel_version=/{print $2}' output/build-info.txt 2>/dev/null | head -n1 || true)
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${files[@]}" --clobber
-          else
-            gh release create "$tag" "${files[@]}" \
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
               --prerelease \
               --title "kmod apks $tag" \
               --notes "机型类别 ${{ inputs.label }}（${{ inputs.device_list }}）；内核 ${kver:-unknown}；与本次固件同一次构建、同一棵树产出，vermagic 见 artifact 里的 build-info.txt。发布入口会把它们归入 ufo1cn/ponwrt-apk-repo 的 ${{ inputs.apk_repo_branch }} 分支的 ponwrt-k<kver>/<能力>/ 并重建签名索引；装包前把 public-key.pem 放 /etc/apk/keys/ 即可免 --allow-untrusted。"
           fi
-          echo ">>> kmod 预发布：$(ls -1 kmods/*.apk 2>/dev/null | wc -l) 个 apk -> $tag"
+          existing=$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          upload_with_retry() {
+            local f="$1" attempt=1 max=6 out rc=0
+            while :; do
+              out=$(gh release upload "$tag" "$f" --clobber 2>&1) && return 0
+              if printf '%s' "$out" | grep -qE 'secondary rate limit|HTTP 403|HTTP 429|abuse detection'; then
+                if [ "$attempt" -gt "$max" ]; then
+                  printf '::error::上传 %s 连续 %s 次被 GitHub 限流，放弃\n%s\n' "$f" "$max" "$out"
+                  return 1
+                fi
+                printf '::warning::上传 %s 被限流（第 %s 次），退避 %s 秒后重试\n' "$f" "$attempt" "$((attempt * 60))"
+                sleep $((attempt * 60))
+                attempt=$((attempt + 1))
+                continue
+              fi
+              printf '::error::上传 %s 失败\n%s\n' "$f" "$out"
+              return 1
+            done
+          }
+          n=0
+          for f in "${files[@]}"; do
+            name=$(basename "$f")
+            if printf '%s\n' "$existing" | grep -qxF "$name"; then continue; fi
+            upload_with_retry "$f" || exit 1
+            n=$((n + 1))
+            if [ $((n % 10)) -eq 0 ]; then sleep 5; fi
+          done
+          echo ">>> kmod 预发布：本次上传 ${n} 个，release ${tag} 现有 $(gh release view "$tag" --json assets --jq '.assets | length' 2>/dev/null || echo '?') 个 asset"
