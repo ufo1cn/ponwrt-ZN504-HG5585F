@@ -1,0 +1,48 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# 2. 重新加载高通量网络缓冲与 IPTV UDP 核心参数
+sysctl -p /etc/sysctl.d/99-custom-net-optimization.conf 2>/dev/null
+
+# 3. 提升核心网桥与有线网口队列深度为 5000，消除突发高码流丢包（不篡改 Wi-Fi AQL/txqueuelen）
+ip link set br-lan txqueuelen 5000 2>/dev/null
+for dev in lan1 lan2 lan3 lan4 eth1 pon0 pppoe-wan; do
+    ip link set "$dev" txqueuelen 5000 2>/dev/null
+done
+
+# 4. 放行 LLDP 0x4000 避免下挂 AP 组播心跳产生 rx_dropped
+echo 0x4000 > /sys/devices/virtual/net/br-lan/bridge/group_fwd_mask 2>/dev/null
+for eth_port in /sys/devices/virtual/net/br-lan/brif/lan* /sys/devices/virtual/net/br-lan/brif/eth* /sys/devices/virtual/net/br-lan/brif/pon*; do
+    [ -d "$eth_port" ] && echo 2 > "$eth_port/multicast_router" 2>/dev/null
+done
+
+# 5. 科学分核以太网核心硬中断（彻底解放 CPU0，保留 NAPI 线程全核自由调度）
+pin_irq() {
+    local irq_num
+    irq_num=$(awk -v name="$1" '$NF == name { gsub(":", "", $1); print $1; exit }' /proc/interrupts)
+    [ -n "$irq_num" ] && [ -w "/proc/irq/$irq_num/smp_affinity_list" ] && echo "$2" > "/proc/irq/$irq_num/smp_affinity_list" 2>/dev/null || true
+}
+pin_irq "airoha_eth.0" 1
+pin_irq "airoha_eth.4" 2
+
+# 6. 锁定 CPU performance 满频 (1200 MHz)，消除 ondemand 升频滞后
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -w "$g" ] && echo performance > "$g" 2>/dev/null || true
+done
+
+# 7. 调优 PPE 流表硬件加速触发门限（降至 5 pps）
+if [ -w /sys/kernel/debug/ppe/bind_rate ]; then
+    echo "5 5" > /sys/kernel/debug/ppe/bind_rate 2>/dev/null
+fi
+
+ethtool -K tailscale0 rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
+ethtool -K pppoe-wan gro on 2>/dev/null
+
+# 8. 保护光纤心跳进程 airoha-pond：免疫 OOM Killer (-1000)
+for p in $(pgrep airoha-pond 2>/dev/null); do
+    echo -1000 > "/proc/$p/oom_score_adj" 2>/dev/null
+done
+
+tailscale set --accept-routes=false 2>/dev/null || true
+
+exit 0
