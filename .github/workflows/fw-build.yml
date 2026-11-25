@@ -146,7 +146,7 @@ jobs:
           open(mk, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines) + '\n')
           PY
           # 逐机型核对：有预装清单的必须有标记行，清单为空的必须没有标记行
-          while IFS='\t' read -r dev pre; do
+          while IFS=$'\t' read -r dev pre; do
             [ -n "$dev" ] || continue
             if [ -n "${pre// /}" ]; then
               grep -q "ponwrt-preinstall:${dev}" target/linux/airoha/image/an7581.mk \
