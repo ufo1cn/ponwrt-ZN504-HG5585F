@@ -288,12 +288,15 @@ jobs:
         run: |
           set -euo pipefail
           # 设计口径：kmod 只由 fw-build 编（与固件同树同配置，vermagic 一致）。
-          # run 45521735037 实证：只删行不管用——make 发现 .config 与 tmp/.config-package.in
-          # 不同步（"your configuration is out of sync"）会自己跑 syncconfig，把默认 y 的
-          # gpio-button-hotplug 与 kernel 元包写回来，随后 nlbwmon 依赖链去编
-          # package/kernel/gpio-button-hotplug，包流没有内核树 → "No rule to make target
-          # .../linux-6.18.60/.config"。正确做法：写成显式 not set（kconfig 会保留用户值），
-          # 并在 oldconfig 前后各摘一次，最后硬校验为零。
+          # run 45604647722 / 45604653366 实证：只在 .config 里写 not set 不够——
+          # package/kernel/linux/Makefile 第 50 行硬写 CONFIG_PACKAGE_kernel=y 且无条件
+          # BuildPackage,kernel（hidden + default y），gpio-button-hotplug 是 KernelPackage
+          # （用 KERNEL_MAKE 编）；两者只要还在包元数据里，每次 syncconfig 都会把它们
+          # 写回 y，任何 make package/.../compile 都先把内核拉进依赖链，包流没有内核
+          # 构建产物 → ERROR: package/kernel/linux failed to build（modules.builtin 缺失）。
+          # 因此：① 在 CI 树内摘掉这两个包定义（不改仓库、不碰内核源码，modules/*.mk
+          # 里的 kmod 定义保留）；② 清单包 Makefile 摘掉 +kmod-*/+kernel/+gpio-button-hotplug；
+          # ③ 删 tmpinfo 后 oldconfig 重建，再在 .config 里显式 not set 并硬校验为零。
           strip_pkg_sel() {
             awk '
               /^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=/ {
@@ -302,6 +305,50 @@ jobs:
               { print }
             ' .config > .config.strip && mv .config.strip .config
           }
+
+          # ① 摘掉 kernel 元包与 gpio-button-hotplug 的包定义
+          kf=package/kernel/linux/Makefile
+          gf=package/kernel/gpio-button-hotplug/Makefile
+          for f in "$kf" "$gf"; do
+            [ -f "$f" ] || { echo "::error::缺少 $f"; exit 1; }
+          done
+          grep -q 'BuildPackage,kernel' "$kf" || { echo "::error::$kf 形态变化：未找到 BuildPackage,kernel"; exit 1; }
+          grep -q 'KernelPackage,gpio-button-hotplug' "$gf" || { echo "::error::$gf 形态变化：未找到 KernelPackage,gpio-button-hotplug"; exit 1; }
+          awk '
+            /^CONFIG_PACKAGE_kernel=y$/ { print "# CI(pkgs): kernel 元包由固件流程编，包流内摘除"; next }
+            /BuildPackage,kernel/ { print "# CI(pkgs): " $0 "  # disabled: userland-only pkg flow"; next }
+            { print }
+          ' "$kf" > "$kf.ci" && mv "$kf.ci" "$kf"
+          awk '
+            /KernelPackage,gpio-button-hotplug/ { print "# CI(pkgs): " $0 "  # disabled: needs kernel tree"; next }
+            { print }
+          ' "$gf" > "$gf.ci" && mv "$gf.ci" "$gf"
+          echo ">>> 已在树内摘除 kernel 元包与 gpio-button-hotplug 的包定义"
+
+          # ② 清单包 Makefile 摘掉 kmod / kernel / gpio 依赖
+          : > /tmp/stripped-kmods.txt
+          touched=0
+          for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
+            [ -f "$manifest" ] || continue
+            while IFS='|' read -r path apk required; do
+              [ -n "${path:-}" ] || continue
+              case "$path" in \#*) continue ;; esac
+              [ -f "$path/Makefile" ] || continue
+              hits=$(grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)' "$path/Makefile" | sed 's/^+//' | sort -u || true)
+              [ -n "$hits" ] || continue
+              sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$path/Makefile"
+              sed -i -E '/^[[:space:]]*DEPENDS/ s/[[:space:]]+/ /g; /^[[:space:]]*DEPENDS/ s/[[:space:]]+$//' "$path/Makefile"
+              touched=$((touched+1))
+              printf '%s\n' "$hits" >> /tmp/stripped-kmods.txt
+              echo ">>> 摘掉依赖：$apk ->$(printf ' %s' $hits)"
+            done < "$manifest"
+          done
+          sort -u /tmp/stripped-kmods.txt -o /tmp/stripped-kmods.txt
+          echo ">>> 共 $touched 个包、$(wc -l < /tmp/stripped-kmods.txt) 个不同依赖被摘除（kmod 由固件流程编）"
+          { echo "### 已摘除的 kmod 依赖（由固件流程编译）"; echo '```'; cat /tmp/stripped-kmods.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+          # ③ 重建包元数据（此时元数据里已无 kernel/gpio 定义），再清洁 .config
+          rm -f tmp/.config-package.in tmp/.packageinfo tmp/.packagedeps
           strip_pkg_sel
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/inc-oldconfig.log 2>&1 || {
             tail -n 60 /tmp/inc-oldconfig.log
@@ -312,12 +359,20 @@ jobs:
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/inc-oldconfig2.log 2>&1 || true
           strip_pkg_sel
           touch .config
+
+          # ④ 硬校验：.config 不得有 kmod/kernel/gpio 选择，元数据不得再含 kernel/gpio 定义
           left_kmod=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
           left_kernel=$(grep -cE '^CONFIG_PACKAGE_kernel=' .config || true)
           left_gpio=$(grep -cE '^CONFIG_PACKAGE_gpio-button-hotplug=' .config || true)
           echo ">>> 剩余选择 kmod=${left_kmod:-0} kernel=${left_kernel:-0} gpio-button-hotplug=${left_gpio:-0}"
           [ "${left_kmod:-0}" -eq 0 ] && [ "${left_kernel:-0}" -eq 0 ] && [ "${left_gpio:-0}" -eq 0 ] \
             || { echo "::error::.config 里仍有 kmod/kernel 包选择，会触发内核编译"; exit 1; }
+          if grep -qE '^config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in 2>/dev/null; then
+            grep -nE '^config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in || true
+            echo "::error::包元数据里仍有 kernel/gpio-button-hotplug 定义，会触发内核编译"
+            exit 1
+          fi
+          echo ">>> 包元数据内 kernel/gpio 定义：0"
 
       - name: Build host tools and toolchain
         run: |
