@@ -31,3 +31,7 @@ package/feeds/homeproxy/luci-app-homeproxy|luci-app-homeproxy|required
 # ---- Windows 文件共享：ksmbd（备用，与 samba4 不冲突；默认不装，迁移时再切）----
 package/feeds/packages/ksmbd-tools|ksmbd-tools|required
 package/feeds/luci/luci-app-ksmbd|luci-app-ksmbd|required
+
+# ---- OpenAppFilter（内核侧 kmod-oaf 由固件流编，这里只编用户态）----
+package/feeds/oaf/open-app-filter|appfilter|required
+package/feeds/oaf/luci-app-oaf|luci-app-oaf|required
