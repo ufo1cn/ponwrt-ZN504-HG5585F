@@ -259,6 +259,12 @@ jobs:
             printf 'src-git iptv https://github.com/yveming/openwrt-iptv.git\n' >> feeds.conf.default
           fi
           grep 'src-git iptv ' feeds.conf.default
+          # OAF（OpenAppFilter）：kmod-oaf 是树外内核模块（KernelPackage/oaf），
+          # 必须与固件内核同一次编译，vermagic 才一致；包流不编它。
+          if ! grep -q 'src-git oaf ' feeds.conf.default; then
+            printf 'src-git oaf https://github.com/destan19/OpenAppFilter.git\n' >> feeds.conf.default
+          fi
+          grep 'src-git oaf ' feeds.conf.default
 
       - name: Update and install feeds
         run: |
