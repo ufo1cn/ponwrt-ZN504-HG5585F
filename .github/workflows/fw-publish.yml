@@ -32,19 +32,28 @@ on:
         description: 内容相同也强制发版（默认 false=镜像 sha256 没变就跳过）
         type: boolean
         default: false
+      idx_branch:
+        description: '写哪个索引分支（repo=主线五台 / 源 master+label all；repo-wed=WED 两台 HG5585F / 源 feat/wed-npu-offload-6.18+label wed）'
+        type: choice
+        options:
+          - repo
+          - repo-wed
+        default: repo
 
 permissions:
   contents: read
   actions: read
 
+# 与 pkg-publish、apk-repo 的 reindex 共用同一把写锁（按索引分支区分）：
+# 三者都往同一个分支 commit，串行排队比各自 rebase 重试可靠。
 concurrency:
-  group: fw-publish-${{ inputs.devices }}
+  group: apk-repo-write-${{ inputs.idx_branch }}
   cancel-in-progress: false
 
 env:
   SRC_REPO: ${{ github.repository }}
   DST_REPO: ufo1cn/ponwrt-apk-repo
-  IDX_BRANCH: repo
+  IDX_BRANCH: ${{ inputs.idx_branch }}
 
 jobs:
   publish:
@@ -56,13 +65,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SEL: ${{ inputs.devices }}
           SRC_RUN: ${{ inputs.source_run }}
+          IDXB: ${{ inputs.idx_branch }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import os, subprocess, sys
 
-          # 三台机型现在由同一个入口 fw-all.yml 一次构建，一个 artifact 带三份镜像；
-          # 机型只用于挑选 artifact 里的哪个 .itb。
+          # 索引分支决定源分支、产物 label 与可发布机型：
+          #   repo     -> master（五台，fw-all.yml label=all）
+          #   repo-wed -> feat/wed-npu-offload-6.18（两台 HG5585F，fw-all.yml label=wed）
           MAP = {
               'fiberhome_hg5585f-ct': 'fw-all.yml',
               'fiberhome_hg5585f-ct-usb-sfp': 'fw-all.yml',
@@ -70,12 +81,24 @@ jobs:
               'nokia_xg-040g-md-ubi': 'fw-all.yml',
               'znxt_zn504xg-d': 'fw-all.yml',
           }
+          IDX = (os.environ.get('IDXB') or 'repo').strip()
+          if IDX == 'repo-wed':
+              SRC_BRANCH = 'feat/wed-npu-offload-6.18'
+              LABEL = 'wed'
+              ONLY = ['fiberhome_hg5585f-ct', 'fiberhome_hg5585f-ct-usb-sfp']
+          elif IDX == 'repo':
+              SRC_BRANCH = 'master'
+              LABEL = 'all'
+              ONLY = []
+          else:
+              sys.exit('未知索引分支：%s' % IDX)
+
           SEL = os.environ['SEL']
           SRC = os.environ['SRC_REPO']
           SRC_RUN = os.environ.get('SRC_RUN', '').strip()
 
           if SEL == 'all':
-              devices = list(MAP)
+              devices = ONLY or list(MAP)
           elif SEL == 'ct+5382a':
               devices = ['fiberhome_hg5585f-ct', 'fiberhome_hg5382a']
           elif SEL == 'hg5585f-ct':
@@ -91,23 +114,36 @@ jobs:
           else:
               sys.exit('未知机型选择：%s' % SEL)
 
+          if ONLY:
+              bad = [d for d in devices if d not in ONLY]
+              if bad:
+                  sys.exit('repo-wed 只收 WED 分支编出的 %s，%s 不在其中' % (' / '.join(ONLY), ','.join(bad)))
+
+          QBRANCH = SRC_BRANCH.replace('/', '%2F')
           rows = []
           for dev in devices:
               wf = MAP[dev]
               if SRC_RUN:
                   out = subprocess.check_output(
                       ['gh', 'api', 'repos/%s/actions/runs/%s' % (SRC, SRC_RUN),
-                       '--jq', '[.id,.run_number,.head_sha,.name,.conclusion,.created_at,.path]|@tsv'],
+                       '--jq',
+                       '[.id,.run_number,.head_sha,.name,.conclusion,.created_at,.path,.head_branch]|@tsv'],
                       text=True).strip()
               else:
                   out = subprocess.check_output(
                       ['gh', 'api',
-                       'repos/%s/actions/workflows/%s/runs?status=success&per_page=1' % (SRC, wf),
-                       '--jq', '.workflow_runs[0] | [.id,.run_number,.head_sha,.name,.conclusion,.created_at,.path]|@tsv'],
+                       'repos/%s/actions/workflows/%s/runs?status=success&per_page=1&branch=%s'
+                       % (SRC, wf, QBRANCH),
+                       '--jq',
+                       '.workflow_runs[0] | [.id,.run_number,.head_sha,.name,.conclusion,.created_at,.path,.head_branch]|@tsv'],
                       text=True).strip()
               if not out:
-                  sys.exit('机型 %s 找不到可用的成功构建（%s）' % (dev, wf))
-              rid, rnum, sha, name, concl, created, path = out.split('\t')
+                  sys.exit('机型 %s 在 %s 上找不到可用的成功构建（%s）' % (dev, SRC_BRANCH, wf))
+              rid, rnum, sha, name, concl, created, path, hb = out.split('\t')
+              # 源 run 必须来自对应分支：repo 只认 master、repo-wed 只认 WED 分支
+              if hb and hb != SRC_BRANCH:
+                  sys.exit('源 run %s 的分支是 %s，不是 %s（%s 只发布该分支的产物）'
+                           % (rid, hb, SRC_BRANCH, IDX))
               if concl and concl != 'success':
                   sys.exit('源 run %s 结论是 %s，不是 success' % (rid, concl))
               # 指定 source_run 时可能是 manual 之类的入口，索引里要写实际入口文件名
@@ -117,12 +153,13 @@ jobs:
           with open('plan.tsv', 'w', encoding='utf-8') as f:
               for r in rows:
                   f.write('\t'.join(r) + '\n')
-              print('计划：')
+              print('计划（索引分支 %s / 源分支 %s / label %s）：' % (IDX, SRC_BRANCH, LABEL))
               for r in rows:
                   print('  %-22s %-16s run#%-4s id=%s sha=%s at=%s' % (r[0], r[1], r[3], r[2], r[4][:10], r[5]))
 
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               f.write('devices=%s\n' % ','.join(r[0] for r in rows))
+              f.write('label=%s\n' % LABEL)
           PY
 
       - name: Download firmware artifacts
@@ -408,6 +445,7 @@ jobs:
                       os.environ.get('DRY', '?')))
           PY
             echo
+            echo "索引分支：${IDX_BRANCH}（label ${{ steps.plan.outputs.label }}）"
             echo "索引下载地址：https://raw.githubusercontent.com/${DST_REPO}/${IDX_BRANCH}/meta/fw/<device>.json"
           } >> "$GITHUB_STEP_SUMMARY"
         env:
