@@ -132,8 +132,8 @@ jobs:
         run: |
           set -uo pipefail
           if [ -z "${APK_SIGNING_PRIVATE_KEY:-}" ]; then
-            echo "::warning::仓库未配置 APK_SIGNING_PRIVATE_KEY，本次用 run 内临时密钥（跨 run 不可互信）"
-            exit 0
+            echo "::error::仓库未配置 APK_SIGNING_PRIVATE_KEY（全仓库固定同一把私钥），本次构建不能继续"
+            exit 1
           fi
           # rules.mk: BUILD_KEY_APK_SEC=$(TOPDIR)/private-key.pem / BUILD_KEY_APK_PUB=$(TOPDIR)/public-key.pem
           # 全仓库固定同一把密钥：设备只需装一次 /etc/apk/keys/public-key.pem
