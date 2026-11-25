@@ -1,0 +1,58 @@
+name: PonWrt 固件构建（全机型）
+
+# ==============================================================================
+# 一个入口编三台机型：usb-wifi / usb / plain。
+#
+# 为什么放在一个工作流里：三台机型的**内核与 kmod 完全统一**（同一套符号、同一
+# 指纹），重复编内核纯属浪费。这里用 max-parallel=1 的顺序矩阵，配合 fw-build.yml
+# 里统一的内核树缓存 key（不再按 label 分叉），第 2、3 台直接复用第 1 台编好的
+# toolchain + 内核树，只做「装机 + 打镜像」，不重编内核。
+#
+# 每台机型装什么，只由 configs/devices/<board>.config 决定：
+#   DEVICE_CAPS        能力（usb / wifi / bt）
+#   DEVICE_PREINSTALL  预装进该机型 rootfs 的包清单 → 写进 Device 定义（DEVICE_PACKAGES）
+# 全局 .config 里的 kmod 一律 =m（编出 apk、不进镜像），所以能力弱的机型不会被
+# 塞进 USB / 无线驱动。
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_mode:
+        description: '编译缓存模式'
+        required: true
+        default: '使用缓存'
+        type: choice
+        options:
+          - '使用缓存'
+          - '重新编译'
+          - '不使用缓存'
+      upload_release:
+        description: '上传 GitHub Release（本仓库）'
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: fw-all-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  firmware:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - board: fiberhome_hg5585f-ct
+            label: usb-wifi
+          - board: nokia_xg-040g-md-ubi
+            label: usb
+          - board: fiberhome_hg5382a
+            label: plain
+    uses: ./.github/workflows/fw-build.yml
+    with:
+      label: ${{ matrix.label }}
+      device_list: ${{ matrix.board }}
+      upload_release: ${{ inputs.upload_release }}
+      cache_mode: ${{ inputs.cache_mode }}
