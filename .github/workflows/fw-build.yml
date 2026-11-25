@@ -799,50 +799,13 @@ jobs:
             echo "workflow=${{ github.workflow }}"
             echo "built_at=${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
           } | tee output/build-info.txt
-
-      - name: Publish provenance baseline to apk repo
-        env:
-          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
-        run: |
-          set -uo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::未配置 APK_REPO_TOKEN，跳过基线发布（本次仍随 artifact/Release 记录）"
-            exit 0
-          fi
-          [ -f output/build-info.txt ] || { echo "::warning::没有 build-info.txt，跳过"; exit 0; }
-          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
-          rm -rf /tmp/apkmeta
-          if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/apkmeta 2>/dev/null; then
-            echo "::warning::apk-repo 的 repo 分支还取不到，跳过基线发布"
-            exit 0
-          fi
-          mkdir -p /tmp/apkmeta/meta
-          cp -f output/build-info.txt "/tmp/apkmeta/meta/firmware-k${KVER}-$(git rev-parse --short HEAD).txt"
-          cp -f output/build-info.txt /tmp/apkmeta/meta/latest.txt
-          # 单一事实来源：把本次装配出来的 .config 与解析后的内核 .config.set 一起放上基线，
-          # 包流程（incremental/legacy/extra）只许继承或比对，不许自己另造一套内核配置。
-          cp -f .config "/tmp/apkmeta/meta/config-${{ inputs.label }}.txt" 2>/dev/null || true
+          # 装配出来的 .config 与解析后的内核 .config.set 一起随产物发布（本仓 Release），
+          # 作为“这次固件到底用什么配置编出来的”留档。发布到软件仓库由收集类工作流负责，
+          # 固件编译流程不再向 apk-repo 推送任何内容。
+          cp -f .config "output/config-${{ inputs.label }}.txt" 2>/dev/null || true
           kcfg=$(ls build_dir/target-*/linux-*/.config.set 2>/dev/null | head -n1 || true)
-          [ -n "$kcfg" ] && { cp -f "$kcfg" "/tmp/apkmeta/meta/kconfig-${{ inputs.label }}.txt" || true; }
-          python3 - "output/build-info.txt" "$KVER" "${{ inputs.device_list }}" > /tmp/apkmeta/meta/firmware.json <<'PY'
-          import json,sys
-          src,kver,dev=sys.argv[1],sys.argv[2],sys.argv[3]
-          d={}
-          for line in open(src,encoding="utf-8"):
-              if "=" in line:
-                  k,v=line.strip().split("=",1); d[k]=v
-          d["kernel_version"]=kver; d["devices"]=dev
-          print(json.dumps(d,ensure_ascii=False,indent=2))
-          PY
-          cat /tmp/apkmeta/meta/firmware.json
-          git -C /tmp/apkmeta add -A
-          git -C /tmp/apkmeta -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
-            commit -m "meta: firmware k=$KVER run=${{ github.run_number }}" || true
-          for i in 1 2 3; do
-            if git -C /tmp/apkmeta push origin repo; then echo ">>> 基线已发布到 apk-repo/meta"; exit 0; fi
-            git -C /tmp/apkmeta fetch origin repo && git -C /tmp/apkmeta rebase origin/repo || true
-          done
-          echo "::warning::基线推送失败（不影响固件产物，下一轮巡检会补）"
+          [ -n "$kcfg" ] && { cp -f "$kcfg" "output/kconfig-${{ inputs.label }}.txt" || true; }
+          ls -l output/config-*.txt output/kconfig-*.txt 2>/dev/null || true
 
 
       # 内核树缓存保存。失败也存（always）：半成品 build_dir 与 stamp 是一致
@@ -1130,87 +1093,3 @@ jobs:
               --notes "机型类别 ${{ inputs.label }}（${{ inputs.device_list }}）；内核 ${kver:-unknown}；与本次固件同一次构建、同一棵树产出，vermagic 见 artifact 里的 build-info.txt。装包前把 public-key.pem 放 /etc/apk/keys/ 即可免 --allow-untrusted。"
           fi
           echo ">>> kmod 预发布：$(ls -1 kmods/*.apk 2>/dev/null | wc -l) 个 apk -> $tag"
-
-      - name: Publish firmware update index to apk repo
-        if: inputs.upload_release
-        env:
-          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
-        run: |
-          set -uo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::未配置 APK_REPO_TOKEN，跳过固件更新索引发布"
-            exit 0
-          fi
-          TAG="${{ steps.tag.outputs.release_tag }}"
-          [ -n "$TAG" ] || { echo "::warning::没有 tag，跳过索引发布"; exit 0; }
-          [ -n "${DEVICE_LIST:-}" ] || { echo "::error::DEVICE_LIST 为空（job env 没注入 inputs.device_list）"; exit 1; }
-          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/ufo1cn/ponwrt-apk-repo.git"
-          rm -rf /tmp/fwidx
-          if ! git clone --depth=1 --branch repo "$REPO_URL" /tmp/fwidx 2>/dev/null; then
-            echo "::warning::apk-repo 的 repo 分支取不到，跳过索引发布"
-            exit 0
-          fi
-          mkdir -p /tmp/fwidx/meta/fw
-          commit=$(git rev-parse HEAD)
-          kver=$(sed -n 's/^kernel_version=//p' output/build-info.txt 2>/dev/null | head -n1)
-          btime=$(sed -n 's/^built_at=//p' output/build-info.txt 2>/dev/null | head -n1)
-          ptime=$(sed -n 's/^published_at=//p' output/build-info.txt 2>/dev/null | head -n1)
-          [ -n "${ptime:-}" ] || ptime="${PUBLISHED_AT:-}"
-          python3 - "output" "$TAG" "$commit" "${kver:-unknown}" "${btime:-}" "${ptime:-}" "/tmp/fwidx/meta/fw" "$DEVICE_LIST" <<'PY'
-          import json, os, sys
-          outdir, tag, commit, kver, btime, ptime, idxdir, devices = sys.argv[1:9]
-          files = sorted(os.listdir(outdir))
-          for dev in devices.split():
-              up = None
-              for f in files:
-                  if f.endswith('.sha256'):
-                      continue
-                  if dev in f and 'sysupgrade' in f and f.endswith('.itb'):
-                      up = f
-                      break
-              if not up:
-                  print('WARN: %s 没有 sysupgrade 产物，跳过索引' % dev)
-                  continue
-              sha = ''
-              shafile = os.path.join(outdir, up + '.sha256')
-              if os.path.isfile(shafile):
-                  sha = open(shafile, encoding='utf-8').read().split()[0]
-              man = None
-              for f in files:
-                  if f.endswith('.sha256'):
-                      continue
-                  if dev in f and 'manifest' in f:
-                      man = f
-                      break
-              url = 'https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases/download/%s/%s' % (tag, up)
-              d = {
-                  'schema': 1,
-                  'device': dev,
-                  'tag': tag,
-                  'run': int(os.environ.get('GITHUB_RUN_NUMBER', '0') or 0),
-                  'commit': commit,
-                  'kernel_version': kver,
-                  'built_at': btime,
-                  'published_at': ptime,
-                  'sysupgrade': {
-                      'name': up,
-                      'sha256': sha,
-                      'size': os.path.getsize(os.path.join(outdir, up)),
-                      'url': url,
-                  },
-              }
-              if man:
-                  d['manifest'] = {'name': man, 'url': 'https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases/download/%s/%s' % (tag, man)}
-              path = os.path.join(idxdir, dev + '.json')
-              open(path, 'w', encoding='utf-8').write(json.dumps(d, ensure_ascii=False, indent=2) + '\n')
-              print('index ->', path)
-          PY
-          ls -l /tmp/fwidx/meta/fw
-          git -C /tmp/fwidx add -A
-          git -C /tmp/fwidx -c user.email=ci@ponwrt -c user.name=ponwrt-ci \
-            commit -m "meta(fw): $TAG dev=$DEVICE_LIST" || true
-          for i in 1 2 3; do
-            if git -C /tmp/fwidx push origin repo; then echo ">>> 固件更新索引已发布：meta/fw/"; exit 0; fi
-            git -C /tmp/fwidx fetch origin repo && git -C /tmp/fwidx rebase origin/repo || true
-          done
-          echo "::warning::固件更新索引推送失败（不影响固件产物，下一轮会补）"
