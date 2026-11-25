@@ -38,6 +38,10 @@ on:
         description: '指定源 run（格式 incremental=30,legacy=11,extra=12,kmods=15；留空=各取最近一次成功）'
         type: string
         default: ''
+      idx_branch:
+        description: '写哪个索引分支（repo=主线；实验分支用 repo-wed 等）'
+        type: string
+        default: 'repo'
       kver:
         description: '内核版本（决定目录 ponwrt-k<kver>；留空=按源码树推断）'
         type: string
@@ -62,7 +66,7 @@ concurrency:
 env:
   SRC_REPO: ${{ github.repository }}
   DST_REPO: ufo1cn/ponwrt-apk-repo
-  IDX_BRANCH: repo
+  IDX_BRANCH: ${{ inputs.idx_branch }}
   FIXED_PUB_SHA256: d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed
 
 jobs:
@@ -104,6 +108,7 @@ jobs:
           # 所以一条 label 就够，不再分 usb-wifi / usb / plain。
           FW_LABEL_MAP = {
               'all': ('fw-all.yml', 'all'),
+              'wed': ('fw-all.yml', 'wed'),
           }
           pkg_groups = list(MAP)
           groups = pkg_groups + ['kmods'] if groups_in == 'all' else [groups_in]
@@ -153,6 +158,11 @@ jobs:
                       want = f'PonWrt-firmware-{label}-r'
                       run_id, hit = pick_run(wf, want, pinned.get('kmods') or pinned.get(label))
                       if not hit:
+                          # 实验分支（如 wed）的固件可能还没跑出成功产物：all 模式下跳过，
+                          # 显式点名时才报错
+                          if labels_in in ('', 'all'):
+                              print(f'::warning::kmods/{label}：暂无带 {want}* 产物的成功固件 run，跳过', file=sys.stderr)
+                              continue
                           print(f'::error::kmods/{label}：找不到带 {want}* 产物的成功固件 run', file=sys.stderr)
                           sys.exit(1)
                       plan.append({'group': 'kmods', 'device': label, 'fw_device': dev,

@@ -51,6 +51,11 @@ on:
         required: false
         default: false
         type: boolean
+      apk_repo_branch:
+        description: 'apk 仓库索引分支（repo=主线；实验分支指向独立分支，如 repo-wed）'
+        required: false
+        default: 'repo'
+        type: string
 
 concurrency:
   # 按机型类别隔离：usb-wifi / usb / plain 三条互不打断；只有同类别重复运行才取消
@@ -645,7 +650,7 @@ jobs:
           [ -n "$KVER" ] || { echo "::error::算不出内核版本（KERNEL_PATCHVER=$pv）"; exit 1; }
           echo ">>> 预计算内核版本 KVER=$KVER"
           echo "KVER=$KVER" >> "$GITHUB_ENV"
-          RAW="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt-k${KVER}"
+          RAW="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/${{ inputs.apk_repo_branch }}/aarch64_cortex-a53/ponwrt-k${KVER}"
           caps_of() { awk -v d="$1" '$1==d { $1=""; sub(/^[ \t]+/,""); print; exit }' /tmp/dev-caps.tsv; }
           mkdir -p package/base-files/files/etc/apk/repositories.d
           if [ "$n_dev" -gt 1 ]; then
@@ -708,7 +713,7 @@ jobs:
               done
             else
               echo "::warning::仓库还没有 ponwrt-k${KVER}/common 索引，回退旧目录（用户态包与内核无关，可继续用）"
-              lines+=("# PonWrt 在线源（旧目录，未按内核版本分；kmod 不要从这里装）" "https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt/packages.adb")
+              lines+=("# PonWrt 在线源（旧目录，未按内核版本分；kmod 不要从这里装）" "https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/${{ inputs.apk_repo_branch }}/aarch64_cortex-a53/ponwrt/packages.adb")
             fi
             printf '%s\n' "${lines[@]}" > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
             cat package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
