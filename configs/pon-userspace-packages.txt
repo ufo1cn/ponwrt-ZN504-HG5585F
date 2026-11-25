@@ -56,4 +56,4 @@ package/feeds/packages/darkstat|darkstat|required
 package/feeds/packages/nlbwmon|nlbwmon|required
 package/feeds/luci/luci-app-nlbwmon|luci-app-nlbwmon|required
 package/feeds/luci/luci-app-nlbwmon|luci-i18n-nlbwmon-zh-cn|required
-tailscale
+package/feeds/packages/tailscale|tailscale|required
