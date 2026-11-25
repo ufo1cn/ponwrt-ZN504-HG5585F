@@ -63,11 +63,6 @@ on:
         required: true
         default: 'all'
         type: string
-      with_kernel:
-        description: '是否先编内核树（首次必须为 true，kmod 依赖内核 .config）'
-        required: true
-        default: false
-        type: boolean
 
       source_mode:
         description: '源码对齐方式（已弃用：包流程只编应用层，恒用本仓 HEAD）'
@@ -181,6 +176,44 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Preflight 检查依赖内核树的包（只能随固件编）
+        run: |
+          set -euo pipefail
+          # 口径：包流程只收纯用户态包（只依赖 arch + libc + uapi）。
+          # 下列特征说明该包在构建期读内核源码树的派生物，产物与具体内核 config 绑定：
+          # 换 config（例如 WED 分支多打 NPU/WED 补丁、改 DRAM 布局）后结构体偏移/内核符号
+          # 全部失配，装上去不能正常运行。因此这类包只能随固件一起编（fw-build.yml），
+          # 不许进包流程。
+          hits=""
+          for manifest in configs/pon-*.txt; do
+            [ -f "$manifest" ] || continue
+            while IFS='|' read -r path apk required; do
+              [ -n "${path:-}" ] || continue
+              case "$path" in \#*) continue ;; esac
+              dir="$path"
+              if [ ! -d "$dir" ]; then
+                base=$(basename "$path")
+                dir=$(find package/feeds feeds -maxdepth 4 \( -type d -o -type l \) -name "$base" 2>/dev/null | head -n 1 || true)
+                { [ -n "$dir" ] && [ -f "$dir/Makefile" ]; } || dir=""
+              fi
+              [ -n "$dir" ] && [ -f "$dir/Makefile" ] || continue
+              hit=""
+              for pat in '$(LINUX_DIR)' '${LINUX_DIR}' '$(LINUX_KARCH)' 'vmlinux' 'KERNEL_MAKE'; do
+                line=$(grep -nF -- "$pat" "$dir/Makefile" 2>/dev/null | head -n 2 || true)
+                [ -n "$line" ] && hit="${hit}      ${pat}: ${line}\n"
+              done
+              if [ -n "$hit" ]; then
+                hits="${hits}  ${manifest} :: ${apk} (${dir})\n${hit}"
+              fi
+            done < "$manifest"
+          done
+          if [ -n "$hits" ]; then
+            echo "::error::清单内存在需要内核源码树的包，必须随固件（fw-build）编译，不能进包流程："
+            echo -e "$hits"
+            exit 1
+          fi
+          echo ">>> 预检通过：清单内全部为纯用户态包"
+
       - name: Prepare custom packages and patches
         run: |
           bash ./scripts/customize.sh
@@ -279,14 +312,6 @@ jobs:
           make -j"$(nproc)" tools/compile
           make -j"$(nproc)" toolchain/compile
 
-      - name: Build kernel tree (内核头 + staging，kmod 依赖必须存在)
-        # 必需：任何 kmod 依赖（gpio-button-hotplug、kmod-wireguard 等）都要内核 .config 与内核树。
-        # 旧版这里写成 `if: inputs.with_kernel`，with_kernel=false 时整步被跳过 → kmod 0.2s 失败被 `|| true` 吞掉，
-        # 随后逐个上层包连环"编译失败"（run #9 的 12 个 FAIL 就是这么来的）。
-        run: |
-          set -euo pipefail
-          make -j"$(nproc)" target/linux/compile
-          make -j"$(nproc)" target/linux/install || true
 
       - name: List kmod requirements (kmod 由固件流程编译)
         run: |

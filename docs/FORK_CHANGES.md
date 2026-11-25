@@ -17,7 +17,7 @@
 | `fw-build.yml` | 真正的编译体（内核 + kmod + 镜像 + kmod apk） | 按 `configs/devices/*.config` 装机型包；`apk_repo_branch` 决定镜像里的源分支 |
 | `fw-publish.yml` | 把固件搬进 apk-repo 的 Release 并写 `meta/fw/<device>.json` | 供 `luci-app-ponwrt-update` 检查更新 |
 | `pkg-publish.yml` | 把三条包工作流的 apk + 固件流程的 kmod apk 归入 apk-repo 并重建签名索引 | `idx_branch` 选索引分支；`FW_LABEL_MAP` 认 `all` / `wed` |
-| `build-packages-incremental.yml` / `-legacy` / `-extra` | 用户态包、旧板包、额外包 | 与固件同树编，vermagic 一致 |
+| `build-packages-incremental.yml` / `-legacy` / `-extra` | 用户态包、旧板包、额外包 | 只编非 kmod 的用户态包，不含内核树步骤；kmod 全由 `fw-build` 编 |
 
 已删除、不得复活：`fw-usb-wifi.yml`、`fw-usb.yml`、`fw-plain.yml`、`configs/device-features.txt`、`build-firmware-manual.yml`。`PonWrt1.yml`（run 391191043）永不修改。
 
@@ -86,6 +86,8 @@
 
 - `tailscale` 加入 `configs/pon-userspace-packages.txt`，作为独立 apk 由包工作流产出、经 `pkg-publish` 入仓库；不预装进任何机型镜像。依赖的 `kmod-tun` 已在 `configs/an7581.config` 里常年 `=y`。
 - `honk`、`luci-app-honk` 同时在镜像（四台）与仓库里可装。
+
+- 三条包工作流的 kmod 口径：`Configure` 之后先删掉 `.config` 里全部 `CONFIG_PACKAGE_kmod-*` 与 `gpio-button-hotplug` 选择并断言剩余为 0，然后由预检扫描 `configs/pon-*.txt` 清单内每个 Makefile，凡出现 `$(LINUX_DIR)`、`${LINUX_DIR}`、`$(LINUX_KARCH)`、`vmlinux`、`KERNEL_MAKE` 直接失败。这类包（eBPF CO-RE、`perf`、`bpftool` 生成 `vmlinux.h` 等）的产物把内核结构体偏移和私有头锈进二进制，换内核 config 即失效，只能随固件一起编。
 
 ## 十、明确不做
 
