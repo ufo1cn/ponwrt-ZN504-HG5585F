@@ -651,6 +651,15 @@ jobs:
           echo ">>> 预计算内核版本 KVER=$KVER"
           echo "KVER=$KVER" >> "$GITHUB_ENV"
           RAW="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/${{ inputs.apk_repo_branch }}/aarch64_cortex-a53/ponwrt-k${KVER}"
+          # 国内只读镜像（Gitee）：由 apk-repo 的定时工作流在索引重建后自动同步，
+          # 内容与 GitHub 分支一致、同一把私钥签名。用仓库变量 APK_GITEE_BASE 配置，
+          # 形如 https://gitee.com/ufo1cn/ponwrt-apk-repo/raw（留空 = 不加镜像源）。
+          MIRROR=""
+          if [ -n "${{ vars.APK_GITEE_BASE }}" ]; then
+            MIRROR="${{ vars.APK_GITEE_BASE }}/${{ inputs.apk_repo_branch }}/aarch64_cortex-a53/ponwrt-k${KVER}"
+          fi
+          echo ">>> 主源 $RAW"
+          if [ -n "$MIRROR" ]; then echo ">>> 国内镜像 $MIRROR"; fi
           caps_of() { awk -v d="$1" '$1==d { $1=""; sub(/^[ \t]+/,""); print; exit }' /tmp/dev-caps.tsv; }
           mkdir -p package/base-files/files/etc/apk/repositories.d
           if [ "$n_dev" -gt 1 ]; then
@@ -661,15 +670,21 @@ jobs:
               printf '%s %s\n' "$dev" "$(caps_of "$dev")" >> package/base-files/files/etc/ponwrt-device-caps.txt
             done
             printf '%s\n' "$RAW" > package/base-files/files/etc/ponwrt-repo-base.txt
+            if [ -n "$MIRROR" ]; then
+              printf '%s\n' "$MIRROR" > package/base-files/files/etc/ponwrt-repo-mirror.txt
+              echo ">>> 多机型：另带国内镜像前缀 /etc/ponwrt-repo-mirror.txt"
+            fi
             cat > package/base-files/files/etc/uci-defaults/96-ponwrt-apk-repos <<'SH'
           #!/bin/sh
-          # 首次启动：按本机 board_name 查机型能力，生成 apk 源列表
-          # 机型能力表在 /etc/ponwrt-device-caps.txt，源前缀在 /etc/ponwrt-repo-base.txt
+          # 首次启动：按本机 board_name 查机型能力，生成 apk 源列表。
+          # 主源前缀在 /etc/ponwrt-repo-base.txt（GitHub）；国内只读镜像前缀（可选）在
+          # /etc/ponwrt-repo-mirror.txt（Gitee），两者内容一致、同一把私钥签名。
           # board_name 是 OpenWrt 的 "厂商,机型" 形式（fiberhome,hg5585f-ct），
           # 能力表用的是 Device 名（fiberhome_hg5585f-ct），这里统一成下划线。
           board=$(cat /tmp/sysinfo/board_name 2>/dev/null | tr ',' '_')
           base=$(cat /etc/ponwrt-repo-base.txt 2>/dev/null)
-          [ -n "$base" ] || exit 0
+          mirror=$(cat /etc/ponwrt-repo-mirror.txt 2>/dev/null)
+          [ -n "$base" ] || [ -n "$mirror" ] || exit 0
           [ -n "$board" ] || board=unknown
           caps=$(awk -v b="$board" '$1==b { $1=""; sub(/^[ \t]+/,""); print; exit }' /etc/ponwrt-device-caps.txt 2>/dev/null)
           # SFP 变体的 board_name 多一个 -usb-sfp 后缀，回落到基础机型
@@ -680,10 +695,17 @@ jobs:
           mkdir -p "$d"
           {
             echo "# PonWrt 在线源（按机型能力生成：$board）"
-            echo "$base/common/packages.adb"
-            for c in $caps; do echo "$base/$c/packages.adb"; done
+            if [ -n "$base" ]; then
+              echo "$base/common/packages.adb"
+              for c in $caps; do echo "$base/$c/packages.adb"; done
+            fi
+            if [ -n "$mirror" ]; then
+              echo "# 国内镜像源（Gitee 只读快照，与上面同内容同签名）"
+              echo "$mirror/common/packages.adb"
+              for c in $caps; do echo "$mirror/$c/packages.adb"; done
+            fi
           } > "$d/90-ponwrt-apk-repo.list"
-          echo "ponwrt: apk 源已按机型生成（$board -> ${caps:-common only}）"
+          echo "ponwrt: apk 源已按机型生成（$board -> ${caps:-common only}${mirror:+，含国内镜像}）"
           exit 0
           SH
             chmod +x package/base-files/files/etc/uci-defaults/96-ponwrt-apk-repos
@@ -714,6 +736,14 @@ jobs:
             else
               echo "::warning::仓库还没有 ponwrt-k${KVER}/common 索引，回退旧目录（用户态包与内核无关，可继续用）"
               lines+=("# PonWrt 在线源（旧目录，未按内核版本分；kmod 不要从这里装）" "https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/${{ inputs.apk_repo_branch }}/aarch64_cortex-a53/ponwrt/packages.adb")
+            fi
+            if [ -n "$MIRROR" ]; then
+              if curl -fsI --max-time 25 "$MIRROR/common/packages.adb" >/dev/null 2>&1; then
+                lines+=("# 国内镜像源（Gitee 只读快照，与上面同内容同签名）" "$MIRROR/common/packages.adb")
+                for c in $caps; do lines+=("$MIRROR/$c/packages.adb"); done
+              else
+                echo "::warning::Gitee 镜像还没有 ponwrt-k${KVER} 主索引，本次不写入镜像源"
+              fi
             fi
             printf '%s\n' "${lines[@]}" > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
             cat package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
@@ -1006,6 +1036,11 @@ jobs:
             [ -n "$t3" ] || { echo "::error::镜像内缺 /etc/ponwrt-device-caps.txt"; exit 1; }
             grep -q 'ponwrt-k' build_dir/target-*/root-*/etc/ponwrt-repo-base.txt 2>/dev/null \
               || { echo "::error::/etc/ponwrt-repo-base.txt 里没有仓库前缀"; exit 1; }
+            m3=$(ls build_dir/target-*/root-*/etc/ponwrt-repo-mirror.txt 2>/dev/null | head -n1 || true)
+            if [ -n "$m3" ]; then
+              grep -q 'ponwrt-k' "$m3" || { echo "::error::/etc/ponwrt-repo-mirror.txt 里没有仓库前缀"; exit 1; }
+              echo ">>> 多机型：另带国内镜像前缀（$m3）"
+            fi
             echo ">>> 多机型源列表：首次启动脚本 + 机型能力表 + 源前缀都在"
           else
             f3=$(ls build_dir/target-*/root-*/etc/apk/repositories.d/90-ponwrt-apk-repo.list 2>/dev/null | head -n1 || true)
