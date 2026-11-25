@@ -374,43 +374,52 @@ jobs:
           fi
           echo ">>> 包元数据内 kernel/gpio 定义：0"
           # ⑤ 清单包显式选中：包流 .config 来自固件配置，清单里的包未必在其中。
-          #    没有 CONFIG_PACKAGE_<apk>=m 时 make <path>/compile 只做 build 不打包，
+          #    没有 CONFIG_PACKAGE_<符号>=m 时 make <path>/compile 只做 build 不打包，
           #    表现为「编译命令成功但没有产出 apk」（run 45625439183 的 camlive/tailscale/cifs-utils）。
+          #    清单第二列是 apk 文件名（可能带 ABI 后缀或为虚拟名），符号一律经
+          #    scripts/pkg-name-map.sh 映射后再查/写 .config，避免 libnl-core200 / libpcap1 /
+          #    libncursesw / ksmbd-tools 这类名字被 oldconfig 直接丢掉。
+          . scripts/pkg-name-map.sh
           only_pkgs="${{ inputs.only }}"
           selmiss=""
-          for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
-            [ -f "$manifest" ] || continue
-            while IFS='|' read -r pkgpath pkgname pkgreq; do
-              [ -n "${pkgpath:-}" ] || continue
-              case "$pkgpath" in \#*) continue ;; esac
-              if [ "$only_pkgs" != "all" ]; then
-                echo ",$only_pkgs," | grep -q ",${pkgname}," || continue
-              fi
-              [ -d "$pkgpath" ] || continue
-              grep -qE "^CONFIG_PACKAGE_${pkgname}=[ym]$" .config && continue
-              sed -i "/^CONFIG_PACKAGE_${pkgname}=/d; /^# CONFIG_PACKAGE_${pkgname} is not set/d" .config
-              printf 'CONFIG_PACKAGE_%s=m\n' "$pkgname" >> .config
+          manifest=configs/pon-userspace-packages.txt
+          while IFS='|' read -r pkgpath pkgname pkgreq; do
+            [ -n "${pkgpath:-}" ] || continue
+            case "$pkgpath" in \#*) continue ;; esac
+            if [ "$only_pkgs" != "all" ]; then
+              echo ",$only_pkgs," | grep -q ",${pkgname}," || continue
+            fi
+            [ -d "$pkgpath" ] || continue
+            sym=$(pkg_sym_for "$pkgname")
+            if ! grep -qE "^config PACKAGE_${sym}([[:space:]]|$)" tmp/.config-package.in 2>/dev/null; then
+              selmiss="${selmiss} ${pkgname}(元数据无对应符号 ${sym})"
+              continue
+            fi
+            grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config && continue
+            sed -i "/^CONFIG_PACKAGE_${sym}=/d; /^# CONFIG_PACKAGE_${sym} is not set/d" .config
+            printf 'CONFIG_PACKAGE_%s=m\n' "$sym" >> .config
+            if [ "$sym" = "$pkgname" ]; then
               echo ">>> 显式选中清单包 ${pkgname}=m"
-            done < "$manifest"
-          done
+            else
+              echo ">>> 显式选中清单包 ${pkgname} -> ${sym}=m（apk 文件名 $(pkg_apk_for "$pkgname")）"
+            fi
+          done < "$manifest"
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-sel.log 2>&1 || {
             tail -n 40 /tmp/pkg-oldconfig-sel.log
             echo "::error::清单包选择同步失败（oldconfig）"
             exit 1
           }
           strip_pkg_sel
-          for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
-            [ -f "$manifest" ] || continue
-            while IFS='|' read -r pkgpath pkgname pkgreq; do
-              [ -n "${pkgpath:-}" ] || continue
-              case "$pkgpath" in \#*) continue ;; esac
-              if [ "$only_pkgs" != "all" ]; then
-                echo ",$only_pkgs," | grep -q ",${pkgname}," || continue
-              fi
-              [ -d "$pkgpath" ] || continue
-              grep -qE "^CONFIG_PACKAGE_${pkgname}=[ym]$" .config || selmiss="$selmiss ${pkgname}"
-            done < "$manifest"
-          done
+          while IFS='|' read -r pkgpath pkgname pkgreq; do
+            [ -n "${pkgpath:-}" ] || continue
+            case "$pkgpath" in \#*) continue ;; esac
+            if [ "$only_pkgs" != "all" ]; then
+              echo ",$only_pkgs," | grep -q ",${pkgname}," || continue
+            fi
+            [ -d "$pkgpath" ] || continue
+            sym=$(pkg_sym_for "$pkgname")
+            grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config || selmiss="$selmiss ${pkgname}(符号 ${sym})"
+          done < "$manifest"
           [ -z "$selmiss" ] || { echo "::error::清单包在 .config 未被选中（包名不存在或依赖不可选）:${selmiss}"; exit 1; }
           echo ">>> 清单包全部已在 .config 选中（kmod/kernel/gpio 选择仍为 0）"
 
@@ -435,6 +444,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p output build_log
+          . scripts/pkg-name-map.sh
           manifest="configs/pon-userspace-packages.txt"
           [ -f "$manifest" ] || { echo "::error::缺少 $manifest"; exit 1; }
           # 诊断：luci 应用报 “No rule to make target <path>/compile” 说明扫描未登记该包，先把证据落盘
@@ -524,7 +534,9 @@ jobs:
               continue
             fi
             log="build_log/${apk}.log"
-            echo ">>> 编译 $apk ($path)"
+            sym=$(pkg_sym_for "$apk")
+            apkf=$(pkg_apk_for "$apk")
+            echo ">>> 编译 $apk ($path)（符号 ${sym}，产物 ${apkf}-*.apk）"
             ok=0
             # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
             # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
@@ -533,11 +545,11 @@ jobs:
             # 在 .config 与包元数据里是真的存在；不在的话 compile 只是空转，打包必然报
             # cp: cannot stat .../ipkg-install/...
             {
-              echo "--- 配置检查 $apk："
-              grep -n "^CONFIG_PACKAGE_${apk}=" .config || echo "    .config 无 CONFIG_PACKAGE_${apk}"
+              echo "--- 配置检查 $apk（符号 ${sym}）："
+              grep -n "^CONFIG_PACKAGE_${sym}=" .config || echo "    .config 无 CONFIG_PACKAGE_${sym}"
               if [ -f tmp/.packageinfo ]; then
-                echo -n "    .packageinfo 记录数: "; grep -c "^Package: ${apk}$" tmp/.packageinfo || true
-                awk -v p="$apk" '/^Package: /{cur=$2} cur==p && /^Depends: /{print "    depends: "$0; exit}' tmp/.packageinfo || true
+                echo -n "    .packageinfo 记录数: "; grep -c "^Package: ${sym}$" tmp/.packageinfo || true
+                awk -v p="$sym" '/^Package: /{cur=$2} cur==p && /^Depends: /{print "    depends: "$0; exit}' tmp/.packageinfo || true
               else
                 echo "    tmp/.packageinfo 不存在"
               fi
@@ -550,7 +562,7 @@ jobs:
             done
             if [ -z "$bd" ] || [ ! -d "$bd/ipkg-install" ]; then
               echo ">>> 预先清理 $apk 的历史构建状态（build_dir=${bd:-无}）" >> "$log"
-              purge_pkg "$path" "$apk" "$log"
+              purge_pkg "$path" "$apkf" "$log"
             fi
             # 首轮就用 V=s：非 verbose 时包内 prepare/configure/build 的实际动作不可见，
             # 只剩一句 ERROR: package/... failed to build，定位不了「为什么直接跳打包」。
@@ -560,7 +572,7 @@ jobs:
               # 首轮失败：用 make -pn 探测真实 stamp 路径并精确删除，再编一次
               echo "" >> "$log"
               echo ">>> 首轮失败：探测 STAMP_* 真实路径后精确清理，再编一次" >> "$log"
-              purge_pkg "$path" "$apk" "$log"
+              purge_pkg "$path" "$apkf" "$log"
               if make -j"$(nproc)" "$path/compile" >> "$log" 2>&1; then
                 ok=2
               else
@@ -570,7 +582,7 @@ jobs:
               fi
             fi
             if [ "$ok" -ge 1 ]; then
-              hit=$(find bin/packages -type f -name "${apk}-[0-9]*.apk" | head -n 1)
+              hit=$(find bin/packages -type f -name "${apkf}-[0-9]*.apk" | head -n 1)
               if [ -n "$hit" ]; then
                 if [ "$ok" = "2" ]; then
                   summary="${summary}\nOK     $apk -> $hit（清理重试后成功）"
@@ -581,7 +593,7 @@ jobs:
               else
                 {
                   echo "--- 缓存树里该包残余 stamp/ipkg 目录："
-                  ls -ld build_dir/target-*/"$apk"-* build_dir/target-*/"$apk"/.built* 2>/dev/null || echo "(none)"
+                  ls -ld build_dir/target-*/"$apkf"-* build_dir/target-*/"$apkf"/.built* 2>/dev/null || echo "(none)"
                   find staging_dir/target-* -maxdepth 2 -name "*.${apk}*install" 2>/dev/null || true
                 } >> "$log" 2>&1 || true
                 echo "::error::$apk 编译命令成功但没有产出 apk"

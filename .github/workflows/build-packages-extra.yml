@@ -447,11 +447,24 @@ jobs:
           fi
           echo ">>> 包元数据内 kernel/gpio 定义：0"
           # ⑤ 清单包显式选中：包流 .config 来自固件配置，清单里的包未必在其中。
-          #    没有 CONFIG_PACKAGE_<apk>=m 时 make <path>/compile 只做 build 不打包，
+          #    没有 CONFIG_PACKAGE_<符号>=m 时 make <path>/compile 只做 build 不打包，
           #    表现为「编译命令成功但没有产出 apk」（run 45625439183 的 camlive/tailscale/cifs-utils）。
+          #    清单第二列是 apk 文件名（可能带 ABI 后缀或为虚拟名），符号一律经
+          #    scripts/pkg-name-map.sh 映射后再查/写 .config。
+          strip_pkg_sel() {
+            sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=[my]/d' .config
+            sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|kernel) is not set/d' .config
+          }
+          . scripts/pkg-name-map.sh
           only_pkgs="${{ inputs.only }}"
+          case "${{ inputs.scope }}" in
+            both)          sel_manifests=(configs/pon-userspace-packages.txt configs/pon-extra-packages.txt) ;;
+            pon-userspace) sel_manifests=(configs/pon-userspace-packages.txt) ;;
+            extra)         sel_manifests=(configs/pon-extra-packages.txt) ;;
+            *)             sel_manifests=(configs/pon-userspace-packages.txt configs/pon-extra-packages.txt) ;;
+          esac
           selmiss=""
-          for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
+          for manifest in "${sel_manifests[@]}"; do
             [ -f "$manifest" ] || continue
             while IFS='|' read -r pkgpath pkgname pkgreq; do
               [ -n "${pkgpath:-}" ] || continue
@@ -460,10 +473,19 @@ jobs:
                 echo ",$only_pkgs," | grep -q ",${pkgname}," || continue
               fi
               [ -d "$pkgpath" ] || continue
-              grep -qE "^CONFIG_PACKAGE_${pkgname}=[ym]$" .config && continue
-              sed -i "/^CONFIG_PACKAGE_${pkgname}=/d; /^# CONFIG_PACKAGE_${pkgname} is not set/d" .config
-              printf 'CONFIG_PACKAGE_%s=m\n' "$pkgname" >> .config
-              echo ">>> 显式选中清单包 ${pkgname}=m"
+              sym=$(pkg_sym_for "$pkgname")
+              if ! grep -qE "^config PACKAGE_${sym}([[:space:]]|$)" tmp/.config-package.in 2>/dev/null; then
+                selmiss="${selmiss} ${pkgname}(元数据无对应符号 ${sym})"
+                continue
+              fi
+              grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config && continue
+              sed -i "/^CONFIG_PACKAGE_${sym}=/d; /^# CONFIG_PACKAGE_${sym} is not set/d" .config
+              printf 'CONFIG_PACKAGE_%s=m\n' "$sym" >> .config
+              if [ "$sym" = "$pkgname" ]; then
+                echo ">>> 显式选中清单包 ${pkgname}=m"
+              else
+                echo ">>> 显式选中清单包 ${pkgname} -> ${sym}=m（apk 文件名 $(pkg_apk_for "$pkgname")）"
+              fi
             done < "$manifest"
           done
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-sel.log 2>&1 || {
@@ -472,7 +494,7 @@ jobs:
             exit 1
           }
           strip_pkg_sel
-          for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
+          for manifest in "${sel_manifests[@]}"; do
             [ -f "$manifest" ] || continue
             while IFS='|' read -r pkgpath pkgname pkgreq; do
               [ -n "${pkgpath:-}" ] || continue
@@ -481,7 +503,8 @@ jobs:
                 echo ",$only_pkgs," | grep -q ",${pkgname}," || continue
               fi
               [ -d "$pkgpath" ] || continue
-              grep -qE "^CONFIG_PACKAGE_${pkgname}=[ym]$" .config || selmiss="$selmiss ${pkgname}"
+              sym=$(pkg_sym_for "$pkgname")
+              grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config || selmiss="$selmiss ${pkgname}(符号 ${sym})"
             done < "$manifest"
           done
           [ -z "$selmiss" ] || { echo "::error::清单包在 .config 未被选中（包名不存在或依赖不可选）:${selmiss}"; exit 1; }
@@ -493,6 +516,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p output build_log
+          . scripts/pkg-name-map.sh
 
           scope="${{ inputs.scope }}"
           manifests=()
@@ -556,9 +580,11 @@ jobs:
               continue
             fi
 
-            echo ">>> 编译 $apk ($path)"
+            sym=$(pkg_sym_for "$apk")
+            apkf=$(pkg_apk_for "$apk")
+            echo ">>> 编译 $apk ($path)（符号 ${sym}，产物 ${apkf}-*.apk）"
             if make -j"$(nproc)" "$path/compile" 2>&1 | tee "build_log/${apk}.log"; then
-              hit=$(find bin/packages bin/targets -type f -name "${apk}-[0-9]*.apk" | head -n 1)
+              hit=$(find bin/packages bin/targets -type f -name "${apkf}-[0-9]*.apk" | head -n 1)
               if [ -n "$hit" ]; then
                 summary="${summary}\nOK     $apk -> $hit"
                 cp -f "$hit" output/
