@@ -70,7 +70,7 @@ on:
         type: boolean
 
       source_mode:
-        description: '源码对齐方式（追固件源码=按最后一次固件 commit 编，保证 kmod ABI 一致）'
+        description: '源码对齐方式（已弃用：包流程只编应用层，恒用本仓 HEAD）'
         required: true
         default: '追固件源码'
         type: choice
@@ -89,43 +89,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Align source tree with last firmware build
+      - name: Record source tree (userland-only build)
         run: |
           set -euo pipefail
+          # 同 incremental：只编应用层，不读固件基线、不按固件 commit 切树。
           mode="${{ inputs.source_mode }}"
-          fw_url="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/meta/firmware.json"
-          fw_commit=""; fw_kver=""; fw_device=""
-          if curl -fsSL --max-time 30 "$fw_url" -o /tmp/fwmeta.json 2>/dev/null; then
-            fw_commit=$(python3 -c 'import json;d=json.load(open("/tmp/fwmeta.json"));print(d.get("ponwrt_commit",""))' 2>/dev/null || true)
-            fw_kver=$(python3 -c 'import json;d=json.load(open("/tmp/fwmeta.json"));print(d.get("kernel_version",""))' 2>/dev/null || true)
-            fw_device=$(python3 -c 'import json;d=json.load(open("/tmp/fwmeta.json"));print(d.get("devices",""))' 2>/dev/null || true)
-          else
-            echo "::warning::apk-repo 里还没有 meta/firmware.json（固件侧还没发布基线），本次按本仓 HEAD 编译"
-          fi
           cur=$(git rev-parse HEAD)
-          echo ">>> 固件基线：commit=${fw_commit:-无} kernel=${fw_kver:-无} devices=${fw_device:-无}"
-          echo ">>> 当前源码树：commit=$cur"
-          if [ "$mode" = "追固件源码" ] && [ -n "$fw_commit" ] && [ "$fw_commit" != "$cur" ]; then
-            echo "::warning::源码树与最后一次固件不一致（固件 $fw_commit / 本树 $cur），按固件版本切源码，保证 kmod ABI 与固件一致"
-            if ! git fetch --depth=1 origin "$fw_commit" 2>/dev/null; then
-              echo ">>> 单 commit 浅取失败，回退完整 fetch"
-              git fetch --unshallow origin master 2>/dev/null || git fetch origin master 2>/dev/null || true
-            fi
-            if git cat-file -e "${fw_commit}^{commit}" 2>/dev/null; then
-              git checkout -f "$fw_commit"
-              echo ">>> 已切到固件源码 $(git rev-parse HEAD)"
-            else
-              echo "::error::拿不到固件构建用的 commit $fw_commit（源码对不齐，kmod 会 ABI 不匹配），中止"
-              exit 1
-            fi
-          elif [ "$mode" = "追固件源码" ] && [ -n "$fw_commit" ]; then
-            echo ">>> 源码树已与固件一致（$cur），无需切换"
-          fi
+          echo ">>> 包流程只编应用层，不读固件基线；源码树=本仓 HEAD commit=$cur（source_mode=$mode 不再触发切树）"
           {
             echo "aligned_commit=$(git rev-parse HEAD)"
-            echo "firmware_commit=${fw_commit:-none}"
-            echo "firmware_kernel=${fw_kver:-none}"
-            echo "firmware_device=${fw_device:-none}"
+            echo "firmware_commit=none"
+            echo "firmware_kernel=none"
+            echo "firmware_device=none"
             echo "source_mode=$mode"
           } > .ci-source-commit
           cat .ci-source-commit
@@ -676,10 +651,6 @@ jobs:
             staging_dir/target-*
             staging_dir/host
           key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-${{ github.run_id }}
-
-      - name: Enforce firmware baseline parity (hard gate)
-        if: always()
-        run: bash .github/scripts/check-fw-parity.sh
 
       - name: Stage host apk tool for the publish workflow
         if: always()
