@@ -388,6 +388,29 @@ jobs:
           echo "EOF" >> "$GITHUB_ENV"
           { echo "### 已摘除的 kmod 依赖（由固件流程编译）"; echo '```'; cat /tmp/stripped-kmods.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      # DEPENDS 摘掉之后必须重建包元数据：tmp/.config-package.in 还是摘之前的旧依赖图，
+      # make 又会提示 configuration out of sync，于是每次 make package/.../compile
+      # 都顺着旧图把 package/kernel/linux 拉起来（本流程没有内核树 →
+      # ERROR: package/kernel/linux failed to build）。重建后依赖图才与打过补丁的
+      # Makefile 一致，内核包不再被调度。
+      - name: Refresh package metadata after DEPENDS strip
+        run: |
+          set -euo pipefail
+          rm -f tmp/.config-package.in tmp/.packageinfo tmp/.packagedeps
+          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/oldconfig.log 2>&1 || {
+            tail -n 60 /tmp/oldconfig.log
+            echo "::error::重建包元数据失败（oldconfig）"
+            exit 1
+          }
+          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug)=[my]/d' .config
+          left=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
+          echo ">>> 元数据重建后剩余 kmod 选择：${left:-0}"
+          [ "${left:-0}" -eq 0 ] || {
+            grep -E '^CONFIG_PACKAGE_kmod-' .config || true
+            echo "::error::重建包元数据后 .config 仍带 kmod 选择"
+            exit 1
+          }
+
       # kmod 不在这里编：统一由固件构建流程（fw-build.yml）编译并作为 apk 发布，
       # 保证 build/src/ABI 与固件同一次构建一致（清单见 configs/features/kmod-repo.config）
       - name: Build packages (B/C 两组清单, no silent drop)
