@@ -66,7 +66,7 @@ on:
       with_kernel:
         description: '是否先编内核树（首次必须为 true，kmod 依赖内核 .config）'
         required: true
-        default: true
+        default: false
         type: boolean
 
       source_mode:
@@ -260,6 +260,18 @@ jobs:
             fi
           done < "$TMP"
           echo ">>> 未落地必需包数: $miss"
+
+      - name: Strip kmod selections (内核模块统一由固件流程编译)
+        run: |
+          set -euo pipefail
+          # 设计口径：kmod 只由 fw-build 编（与固件同树同配置，vermagic 一致）。
+          # 这里把 .config 里的 kmod 选择全部摘掉，包构建就不会再被
+          # package/kernel/gpio-button-hotplug 之类的依赖拉进内核编译。
+          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug)=[my]/d' .config
+          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug) is not set/d' .config
+          left=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
+          echo ">>> 剩余 kmod 选择：${left:-0}"
+          [ "${left:-0}" -eq 0 ] || { echo "::error::.config 里仍有 kmod 选择，会触发内核编译"; exit 1; }
 
       - name: Build host tools and toolchain
         run: |

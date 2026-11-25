@@ -52,7 +52,7 @@ on:
       with_kernel:
         description: '是否先编内核树（首次/改内核配置时必须为 true）'
         required: true
-        default: true
+        default: false
         type: boolean
 
       source_mode:
@@ -251,13 +251,26 @@ jobs:
             echo "note=安装 kmod apk 前必须确认固件来自同一 commit 且 config-6.18 未变"
           } | tee output/build-info.txt
 
+      - name: Strip kmod selections (内核模块统一由固件流程编译)
+        run: |
+          set -euo pipefail
+          # 设计口径：kmod 只由 fw-build 编（与固件同树同配置，vermagic 一致）。
+          # 这里把 .config 里的 kmod 选择全部摘掉，包构建就不会再被
+          # package/kernel/gpio-button-hotplug 之类的依赖拉进内核编译。
+          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug)=[my]/d' .config
+          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug) is not set/d' .config
+          left=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
+          echo ">>> 剩余 kmod 选择：${left:-0}"
+          [ "${left:-0}" -eq 0 ] || { echo "::error::.config 里仍有 kmod 选择，会触发内核编译"; exit 1; }
+
       - name: Build host tools and toolchain
         run: |
           set -euo pipefail
           make -j"$(nproc)" tools/compile
           make -j"$(nproc)" toolchain/compile
 
-      - name: Build kernel tree (内核头 + staging，kmod 依赖必须存在)
+      - name: Build kernel tree (仅当用户态包确实需要内核树)
+        if: inputs.with_kernel
         run: |
           set -euo pipefail
           # 编内核本身与内核模块树；kmod 包的 vermagic 取自这里
