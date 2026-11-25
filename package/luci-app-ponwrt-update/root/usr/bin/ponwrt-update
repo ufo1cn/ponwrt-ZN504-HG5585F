@@ -45,6 +45,26 @@ dev_name() {
 	return 0
 }
 
+# 能力按本机 board_name 查 /etc/ponwrt-device-caps.txt：一次构建多机型时，
+# 版本戳里的 feature_class 是 all，不能直接展示；查不到才退回版本戳。
+dev_caps() {
+	cf=/etc/ponwrt-device-caps.txt
+	b=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+	[ -n "$b" ] || b=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
+	b=$(printf '%s' "$b" | tr ',' '_' | tr -d ' ')
+	line=""
+	if [ -f "$cf" ] && [ -n "$b" ]; then
+		line=$(awk -v d="$b" '$1==d { print; exit }' "$cf")
+		[ -n "$line" ] || line=$(awk -v d="${b%-usb-sfp}" '$1==d { print; exit }' "$cf")
+	fi
+	if [ -n "$line" ]; then
+		# 命中机型就直接用表里的能力（可能为空，表示这台没有 usb/wifi）
+		printf '%s' "$(printf '%s' "$line" | cut -d' ' -f2- | sed 's/^ *//; s/ *$//')"
+		return 0
+	fi
+	vget feature_class
+}
+
 mode() {
 	case "$(uget mode)" in
 	direct | proxy | transparent) uget mode ;;
@@ -124,7 +144,7 @@ rpc_status() {
 	json_init
 	json_add_boolean ok 1
 	json_add_string device "$(dev_name)"
-	json_add_string feature_class "$(vget feature_class)"
+	json_add_string feature_class "$(dev_caps)"
 	json_add_string commit "$(vget commit_short)"
 	json_add_string built_at "$(vget built_at)"
 	json_add_string local_run "$(vget run)"
@@ -320,7 +340,7 @@ out_mode() {
 }
 
 cli_status() {
-	echo "设备：$(dev_name)（能力 $(vget feature_class)）"
+	echo "设备：$(dev_name)（能力 $(dev_caps)）"
 	echo "本地版本：commit $(vget commit_short)，run $(vget run)，构建于 $(vget built_at)"
 	echo "内核：$(uname -r 2>/dev/null)"
 	echo "出站方式：$(out_mode)"
@@ -333,7 +353,7 @@ cli_check() {
 	[ -f "$VF" ] || { echo "缺少 $VF：这不是 PonWrt 固件，或构建时没写入版本戳"; exit 1; }
 	dev=$(dev_name)
 	cur=$(vget run)
-	echo "本地：device=${dev:-?} run=${cur:-0} 能力=$(vget feature_class)"
+	echo "本地：device=${dev:-?} run=${cur:-0} 能力=$(dev_caps)"
 	echo "出站：$(out_mode)；索引：$(idx_base)"
 	[ -n "$dev" ] || { echo "版本戳里没有 device 字段"; exit 1; }
 	tmp=$(mktemp) || exit 1
