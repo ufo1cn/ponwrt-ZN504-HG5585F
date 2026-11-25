@@ -450,7 +450,8 @@ jobs:
           #    没有 CONFIG_PACKAGE_<符号>=m 时 make <path>/compile 只做 build 不打包，
           #    表现为「编译命令成功但没有产出 apk」（run 45625439183 的 camlive/tailscale/cifs-utils）。
           #    清单第二列是 apk 文件名（可能带 ABI 后缀或为虚拟名），符号一律经
-          #    scripts/pkg-name-map.sh 映射后再查/写 .config。
+          #    scripts/pkg-name-map.sh 映射后再写 .config；符号是否存在由 oldconfig 后的
+          #    .config 硬校验判定（映射覆盖不到的真名错误会在此报红，不静默丢）。
           strip_pkg_sel() {
             sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=[my]/d' .config
             sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|kernel) is not set/d' .config
@@ -474,10 +475,6 @@ jobs:
               fi
               [ -d "$pkgpath" ] || continue
               sym=$(pkg_sym_for "$pkgname")
-              if ! grep -qE "^config PACKAGE_${sym}([[:space:]]|$)" tmp/.config-package.in 2>/dev/null; then
-                selmiss="${selmiss} ${pkgname}(元数据无对应符号 ${sym})"
-                continue
-              fi
               grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config && continue
               sed -i "/^CONFIG_PACKAGE_${sym}=/d; /^# CONFIG_PACKAGE_${sym} is not set/d" .config
               printf 'CONFIG_PACKAGE_%s=m\n' "$sym" >> .config
