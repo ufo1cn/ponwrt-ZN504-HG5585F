@@ -86,6 +86,9 @@
 - `reindex-apk-repo.yml` 只作兜底：matrix 跑 `repo` 与 `repo-wed` 两条分支，每 2 小时一次（原 `*/10` 已降频）。正常入库由 `pkg-publish` 自己重签索引，reindex 负责修「手工塞进仓的包 / 发布中断留下的索引漂移」并补签；某分支还没有任何包时只告警跳过，不报错。
 - kmods 分组：`pkg-publish --groups kmods` 直接取固件 artifact 的 `kmods/`，按 `configs/pon-feature-packages.txt` 归类到 common/usb/wifi/bt，所以从更新页装包时 kmod 依赖不再“取不到”。
 
+- Gitee 只读镜像：`reindex-apk-repo.yml` 每 2 小时重建索引后，把 `repo` / `repo-wed` 各做一份**单提交快照**强推到 Gitee（内容变了才推，用 `.snapshot-id` 比对；未配 `secrets.GITEE_USER` / `GITEE_TOKEN` 与变量 `GITEE_REPO` 时只告警跳过）。Gitee 侧分支永远只有 1 个 commit，体积 ≈ 当前文件量，不会因历史累积撞上 500MB 上限；GitHub 仍是唯一写入源。
+- 固件双源：设置仓库变量 `APK_GITEE_BASE`（如 `https://gitee.com/<owner>/ponwrt-apk-repo/raw`）后，镜像内 `/etc/ponwrt-repo-mirror.txt` 记录 Gitee 前缀，`96-ponwrt-apk-repos` 在能力源之后追加同一组 Gitee 源（同内容、同一把私钥签名；`apk` 按版本取最高那份）。变量留空时镜像里只有 GitHub 源，行为与之前一致。
+
 ## 九、软件包（不进镜像）
 
 - `tailscale` 加入 `configs/pon-userspace-packages.txt`，作为独立 apk 由包工作流产出、经 `pkg-publish` 入仓库；不预装进任何机型镜像。依赖的 `kmod-tun` 已在 `configs/an7581.config` 里常年 `=y`。
