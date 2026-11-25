@@ -436,6 +436,14 @@ jobs:
           echo "UNIVERSAL_KMODS=$(wc -l < "$UNION_TMP")" >> "$GITHUB_ENV"
           rm -f "$UNION_TMP"
 
+          # kmod-rfkill 的 DEPENDS 是 @USE_RFKILL（config/Config-kernel.in 里定义，
+          # 默认值取 RFKILL_SUPPORT）；airoha 目标默认没开，导致 kmod-rfkill 永远不可选，
+          # 而机型预装清单里又写了 kmod-rfkill → 镜像 apk add 时报 no such package。
+          # 这里在 defconfig 前显式打开，让 kconfig 把它落成 =m。
+          sed -i '/^# CONFIG_USE_RFKILL is not set/d; /^CONFIG_USE_RFKILL=/d' .config
+          printf 'CONFIG_USE_RFKILL=y\n' >> .config
+          echo ">>> 已写入 CONFIG_USE_RFKILL=y（给 kmod-rfkill 解 @USE_RFKILL）"
+
           # kconfig 解析：只此一次，之后不再 defconfig
           make defconfig
 
