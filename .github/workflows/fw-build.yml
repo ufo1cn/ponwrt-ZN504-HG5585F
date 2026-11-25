@@ -843,6 +843,33 @@ jobs:
           fi
           echo ">>> 期望的 9 个 apk 全部就位"
 
+          # ------------------------------------------------------------------
+          # 代理 / VPN 相关 kmod 覆盖报告：=m 的包是否真的编出了 apk。
+          # 有 apk 或已 =y 烘进镜像都算“可用”；两者都无 → 说明内核符号没落地
+          # （6.18 里符号不存在、或被 DEPENDS 挡住），必须列出来逐个核对。
+          # 第一轮先不 fail，跑出来看缺哪些，再决定补符号还是补依赖。
+          # ------------------------------------------------------------------
+          proxy_list="kmod-tun kmod-dummy kmod-veth kmod-macvlan kmod-inet-diag kmod-netlink-diag \
+            kmod-nft-core kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-bridge kmod-nft-fib \
+            kmod-nft-fullcone kmod-nft-queue kmod-nft-compat kmod-nft-netdev \
+            kmod-nf-conntrack kmod-nf-nat kmod-nf-socket kmod-nf-tproxy kmod-nfnetlink-queue \
+            kmod-ipt-core kmod-ipt-nat kmod-ipt-tproxy kmod-ipt-ipset kmod-ipt-nfqueue kmod-ifb \
+            kmod-ipsec kmod-wireguard kmod-crypto-xcbc kmod-crypto-echainiv kmod-crypto-cbc"
+          missing_proxy=""
+          { echo "### 代理 / VPN kmod 覆盖"; echo "| kmod | apk | 镜像(=y) |"; echo "|---|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          for k in $proxy_list; do
+            apk=n; ls -1 kmods 2>/dev/null | grep -q "^${k}-[0-9]" && apk=y
+            img=n; grep -q "^CONFIG_PACKAGE_${k}=y$" .config && img=y
+            printf '| %s | %s | %s |\n' "$k" "$apk" "$img" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$apk" = n ] && [ "$img" = n ]; then missing_proxy="$missing_proxy $k"; fi
+          done
+          if [ -n "$missing_proxy" ]; then
+            echo "::warning::以下代理/VPN kmod 既没有 apk 也没有进镜像（内核符号或依赖没落地）：$missing_proxy"
+            echo "MISSING_PROXY_KMODS=$missing_proxy" >> "$GITHUB_ENV"
+          else
+            echo ">>> 代理 / VPN 相关 kmod 全部可用（apk 或镜像内置）"
+          fi
+
       - name: Export apk public key for the package repo
         if: always()
         run: |
