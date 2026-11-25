@@ -1,4 +1,4 @@
-name: Build Packages (same kernel tree, incremental) manual
+name: Build Packages (userland only, incremental) manual
 
 # ==============================================================================
 # 只允许手动触发（workflow_dispatch）：无 push / schedule 触发。
@@ -6,7 +6,7 @@ name: Build Packages (same kernel tree, incremental) manual
 # 设计要点
 # 1) 与固件同源：本工作流用 configs/an7581.config + release.config +
 #    pon-packages/*.config 生成与固件完全一致的 .config，编 host 工具链后直接编
-#    **非 kmod 的用户态包**。本流程不含内核树步骤（with_kernel 已移除），
+#    **非 kmod 的用户态包**。本流程不含内核树步骤（原内核树开关已移除），
 #    kmod 一律由 fw-build.yml 编，本流程也不选任何 kmod。
 # 2) 增量：dl / .ccache / build_dir / staging_dir 全部走滚动缓存（key 带 run_id，
 #    restore-keys 前缀命中上一轮），命中后 make 自身按时间戳跳过未变目标；
