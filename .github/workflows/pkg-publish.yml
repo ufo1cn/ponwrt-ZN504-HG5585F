@@ -31,7 +31,7 @@ on:
           - kmods
         default: all
       fw_labels:
-        description: 'kmods 分组取哪几条固件入口：all / usb-wifi,usb,plain 逗号组合'
+        description: 'kmods 分组取哪条固件入口（现在只有统一入口 fw-all.yml，填 all 即可）'
         type: string
         default: 'all'
       source_runs:
@@ -99,10 +99,11 @@ jobs:
           }
           # kmods 不来自包工作流，而是固件流程（fw-build.yml）里同一次构建产出的 kmod apk，
           # 产物名 PonWrt-firmware-<label>-r<run>，apk 在 artifact 的 kmods/ 目录下。
+          # 统一入口：一次构建三机型，全部 kmod 在同一个 artifact 的 kmods/ 下，
+          # 发布时按 configs/pon-feature-packages.txt 归类到 common/usb/wifi/bt，
+          # 所以一条 label 就够，不再分 usb-wifi / usb / plain。
           FW_LABEL_MAP = {
-              'usb-wifi': ('fw-usb-wifi.yml', 'fiberhome_hg5585f-ct'),
-              'usb': ('fw-usb.yml', 'nokia_xg-040g-md-ubi'),
-              'plain': ('fw-plain.yml', 'fiberhome_hg5382a'),
+              'all': ('fw-all.yml', 'all'),
           }
           pkg_groups = list(MAP)
           groups = pkg_groups + ['kmods'] if groups_in == 'all' else [groups_in]
