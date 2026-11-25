@@ -210,6 +210,19 @@ define Device/fiberhome_hg5585f-ct
 endef
 TARGET_DEVICES += fiberhome_hg5585f-ct
 
+# 光口（USB-SFP）版：同 UBI 布局与同一套包，但 DTS 把 gdm4 的第二个 2.5G 口
+# 从 gpy211 电口 PHY 改到 usb_pcs 走 2500base-x，DPB 与 CT 版不同，必须单独出镜像。
+define Device/fiberhome_hg5585f-ct-usb-sfp
+  $(call Device/fiberhome_hg5585f-common)
+  DEVICE_MODEL := HG5585F
+  DEVICE_VARIANT := (CT-USB-SFP)
+  DEVICE_DTS := an7581-fiberhome-hg5585f-ct-usb-sfp
+  DEVICE_PACKAGES += kmod-phy-maxlinear
+  SUPPORTED_DEVICES += fiberhome,hg5585f-ct
+  $(call Device/fiberhome_hg5585f-images)
+endef
+TARGET_DEVICES += fiberhome_hg5585f-ct-usb-sfp
+
 # CU (Unicom) variant shares the HG5585F UBI layout and common MT7916D platform,
 # but uses its own CU DTS and internal switch PHY mapping.
 define Device/fiberhome_hg5585f-cu
@@ -221,8 +234,7 @@ define Device/fiberhome_hg5585f-cu
 endef
 TARGET_DEVICES += fiberhome_hg5585f-cu
 
-# Disabled: non-standard USB 3.0 / SFP variants are intentionally excluded.
-# TARGET_DEVICES += fiberhome_hg5585f-ct-usb-sfp
+# CU 的光口版仍排除（没有可用 DTS / 未验证的硬件）。
 # TARGET_DEVICES += fiberhome_hg5585f-cu-usb-sfp
 
 # Both models share the UBI boot chain and store device data in factory.
