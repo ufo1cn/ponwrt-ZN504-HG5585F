@@ -1204,13 +1204,16 @@ jobs:
             ## 本次构建（机型类别 ${{ inputs.label }}）
 
             - 机型：${{ inputs.device_list }}
-            - 机型能力：由 `configs/devices/<board>.config` 决定（DEVICE_CAPS + DEVICE_PREINSTALL），一次构建内按机型装包
-            - 同一类别内机型能力一致，因此 `=y` 的包不会串到别的类别镜像里
-            - 配置来源：`configs/an7581.config` + `configs/release.config`（不含自有包选装）
-            - 内核能力来源：`target/linux/airoha/an7581/config-6.18` 的基础设施符号
-            - 工作流基线：上游 `build-zn504.yml`（仅改触发方式、机型锁定与产物收集）
-            - 内核与 kmod 同源树编译，ABI 与 `build-packages-incremental.yml` 的 apk 一致
-            - 源码 commit 与内核版本记录在附件 `build-info.txt`（`ponwrt_commit` / `kernel_version` / `kmod_vermagic`）
+            - 装什么包只由 `configs/devices/<board>.config` 决定（`DEVICE_CAPS` / `DEVICE_PREINSTALL`），一次构建内按机型装包
+            - 配置来源：`configs/an7581.config` + `configs/release.config`（不合并自有应用清单，应用走包工作流）
+            - 内核能力：`target/linux/airoha/an7581/config-6.18` + `patches-6.18`（含 9xx 板级、GDM3/4、flowtable 卸载）
+            - 透明代理：`honk` + `luci-app-honk` 已预装（honk-core 由 `honk-install` 运行时按需装）
+            - 内存：`kmod-zram` + `zram-swap` 已预装，首次启动即建压缩交换区（`system.zram_size_mb`），`vm.swappiness=20` 由 `rc.local` 收紧
+            - 全锥 NAT：内核 + `libnftnl` / `nftables` / `firewall4` 补丁已合入镜像，默认未启用（`firewall.@defaults[0].fullcone` 未置 1）
+            - 运行时调优：`sysctl.d`（4MB 缓冲 / BBR+fq / conntrack）、`98-pppoe-rps`、`rc.local`（txqueuelen、IRQ 分核、PPE bind_rate、airoha-pond OOM 守卫）
+            - apk 在线源：`ufo1cn/ponwrt-apk-repo` 的 `${{ inputs.apk_repo_branch }}` 分支，目录 `ponwrt-k<kver>/<能力>/`，与固件同一把固定私钥
+            - 内核与 kmod 同源树编译，ABI 与包工作流一致；commit / kernel_version / kmod_vermagic 见附件 `build-info.txt`
+            - 实验分支 `feat/wed-npu-offload-6.18` 另启用 AN7581 WED v1 TX + MT7916 NPU RX 硬件卸载，产物只留在本 run 的 artifact，不写版本索引
           files: output/*
 
       - name: Publish kmod apks prerelease
@@ -1233,6 +1236,6 @@ jobs:
             gh release create "$tag" "${files[@]}" \
               --prerelease \
               --title "kmod apks $tag" \
-              --notes "机型类别 ${{ inputs.label }}（${{ inputs.device_list }}）；内核 ${kver:-unknown}；与本次固件同一次构建、同一棵树产出，vermagic 见 artifact 里的 build-info.txt。装包前把 public-key.pem 放 /etc/apk/keys/ 即可免 --allow-untrusted。"
+              --notes "机型类别 ${{ inputs.label }}（${{ inputs.device_list }}）；内核 ${kver:-unknown}；与本次固件同一次构建、同一棵树产出，vermagic 见 artifact 里的 build-info.txt。发布入口会把它们归入 ufo1cn/ponwrt-apk-repo 的 ${{ inputs.apk_repo_branch }} 分支的 ponwrt-k<kver>/<能力>/ 并重建签名索引；装包前把 public-key.pem 放 /etc/apk/keys/ 即可免 --allow-untrusted。"
           fi
           echo ">>> kmod 预发布：$(ls -1 kmods/*.apk 2>/dev/null | wc -l) 个 apk -> $tag"

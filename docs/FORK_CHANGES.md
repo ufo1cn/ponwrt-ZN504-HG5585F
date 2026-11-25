@@ -1,178 +1,94 @@
 # Fork 变更说明
 
-上游：`wuziwei/ponwrt-ZN504-HG5585F`（master）
-本仓库：`ufo1cn/ponwrt-ZN504-HG5585F`（fork，master）
+上游：`wuziwei/ponwrt-ZN504-HG5585F`（master）→ 源 `pbs05/ponwrt`
+本仓库：`ufo1cn/ponwrt-ZN504-HG5585F`（编译与发布用）
+包仓库：`ufo1cn/ponwrt-apk-repo`（索引分支 `repo`，实验分支 `repo-wed`）
+旧仓库：`ufo1cn/PonWrt-HG5382A`（已停用，仅存档）
 
-本文件说明本次 fork 后新增/修改了哪些文件、每处改动解决什么问题。所有改动**不含**对上游既有工作流、DTS、分区表、镜像规则的修改。
+本文件只记录**本仓库相对上游的差异**，以及每条差异解决什么问题。上游的 `configs/`、`.github/workflows/` 口径一律不采纳。
 
 ---
 
-## 一、一句话结论
+## 一、构建入口
 
-| 目标 | 落点 |
+| 工作流 | 作用 | 备注 |
+| --- | --- | --- |
+| `fw-all.yml` | 唯一固件入口，一次 `make` 编五台机型 | 调 `fw-build.yml`，`label=all` |
+| `fw-build.yml` | 真正的编译体（内核 + kmod + 镜像 + kmod apk） | 按 `configs/devices/*.config` 装机型包；`apk_repo_branch` 决定镜像里的源分支 |
+| `fw-publish.yml` | 把固件搬进 apk-repo 的 Release 并写 `meta/fw/<device>.json` | 供 `luci-app-ponwrt-update` 检查更新 |
+| `pkg-publish.yml` | 把三条包工作流的 apk + 固件流程的 kmod apk 归入 apk-repo 并重建签名索引 | `idx_branch` 选索引分支；`FW_LABEL_MAP` 认 `all` / `wed` |
+| `build-packages-incremental.yml` / `-legacy` / `-extra` | 用户态包、旧板包、额外包 | 与固件同树编，vermagic 一致 |
+
+已删除、不得复活：`fw-usb-wifi.yml`、`fw-usb.yml`、`fw-plain.yml`、`configs/device-features.txt`、`build-firmware-manual.yml`。`PonWrt1.yml`（run 391191043）永不修改。
+
+## 二、机型与能力
+
+| Device | 能力 | 预装口径 |
+| --- | --- | --- |
+| `fiberhome_hg5585f-ct` | usb wifi bt | 全量 USB/WiFi/BT 预装 + `block-mount` + `honk` + `zram` |
+| `fiberhome_hg5585f-ct-usb-sfp` | usb wifi bt | 同上，另加 `kmod-phy-maxlinear` |
+| `nokia_xg-040g-md-ubi` | usb bt | USB/BT 预装 + `honk` + `zram` |
+| `znxt_zn504xg-d` | usb | USB 预装（去 `kmod-mt7915e`/`kmod-mt7916-firmware`）+ `honk` + `zram` |
+| `fiberhome_hg5382a` | 无 | 只装 `kmod-zram zram-swap`（plain 基线） |
+
+能力只写一处：`configs/devices/<board>.config` 的 `DEVICE_CAPS`；装包清单写 `DEVICE_PREINSTALL`。工作流按能力表校验，能力表与清单不一致会直接失败。
+
+## 三、内核与板级补丁
+
+- `target/linux/airoha/patches-6.18` 共 181 个，含 9xx 板级（930/931/932/947/951-01/951-02/980/999）、748 usb-hsgmii、762 RTL8221B LED、913 PCIe HB reset、310-xx GDM3/4 与 AIROHA PCS/phylink、941-xx NPU fw 信息、915 flowtable 卸载 —— 这些上游与我们都已有。
+- WED / NPU 硬件卸载不在 master，单独放在 `feat/wed-npu-offload-6.18`：
+  - `952-net-mediatek-wed-allow-airoha-ops-only.patch`、`953-net-airoha-add-an7581-wed-v1-tx-offload.patch`、`954-net-airoha-npu-mt7916-rx-and-hostadpt.patch`
+  - `dts/an7581-npu-mt7916.dtsi`（新增）、`dts/an7581-fiberhome-hg5585f-common.dtsi`（加一行 include）
+  - `package/kernel/mt76/patches/120-mt76-npu-connac2-compat.patch`、`121-mt7915-add-airoha-npu-rx-and-double-pcie-wed.patch`
+  - 带上了上游把 NPU 保留内存搬到 high DRAM 的早启动修复；该分支 `fw-all.yml` 只编两台 HG5585F，`label=wed`，只出 artifact、不写版本索引，镜像 apk 源指向 `repo-wed`。
+
+## 四、全锥 NAT（fullcone2）
+
+- 内核 hack：`target/linux/generic/hack-6.18/982-add-bcm-fullconenat-support.patch`、`983-add-bcm-fullconenat-to-nft.patch`、`984-netfilter-reserve-unconfirmed-nat-tuples.patch`、`985-netfilter-bcm-fullcone-reserve-expectation-early.patch`
+- 用户态：`package/libs/libnftnl/patches/002-libnftnl-add-masquerade-fullcone-flag.patch`、`package/network/utils/nftables/patches/103-nftables-add-masquerade-fullcone-flag.patch`、`package/network/config/firewall4/patches/001-firewall4-add-support-for-fullcone-nat.patch`
+- 这些补丁在编译时自动应用，不需要改 `.config`。**默认不启用**：需要 `uci set firewall.@defaults[0].fullcone='1'` 才生效。
+
+## 五、honk 透明代理
+
+- `package/honk`：Makefile、`honk.init`、`honk.config`、`honk-install`（运行时安装 honk-core，镜像只带框架）、`honk.uci-defaults`、`files/config.dae`
+- `package/luci-app-honk`：内嵌 UI、中文菜单与 i18n、ACL
+- `files/usr/bin/sb` + `files/etc/nftables.d/30-sidestore.nft`：nft 侧分流规则
+- `package/luci-app-airoha-npu/root/usr/libexec/rpcd/luci.airoha_npu` 只摘了"按信道频率归频段统计站点"那段；上游整体版本缺 `fw_version` 读取，整体覆盖会让 NPU 面板回到 `Unknown`，故不覆盖。
+- 预装范围：四台完整机型；`hg5382a` 不预装（可用 `repo` 里的 apk 后装）。
+
+## 六、运行时调优
+
+| 文件 | 内容 |
 | --- | --- |
-| 支持我们前面编译的上层应用 | `target/linux/airoha/an7581/config-6.18`（内核基础设施内置）+ `configs/pon-packages/*.config`（7 个分类模块，**只给包工作流**用） |
-| 增加 HG5382A 固件支持 | 新增 `build-firmware-manual.yml` 的机型锁定与产物收集（上游机型定义与 `CONFIG_TARGET_DEVICE_...hg5382a=y` 本来就有，缺口是产物被 `find` 名字过滤静默丢弃） |
-| 为固件编译软件包 | 新增 `build-packages-incremental.yml` |
-| 增量编译 | 该工作流的滚动缓存（dl / ccache / build_dir / staging_dir）+ `only` 只编指定包 |
-| kmod 与固件同内核树 | 该工作流先 `target/linux/compile` 再 `package/kernel/linux/compile`，vermagic 与固件一致 |
-| 旧仓库自有包整理迁入 | `package/pon-userspace/**` + `patches/feeds/**` |
+| `files/etc/sysctl.d/99-custom-net-optimization.conf` | 4MB socket 缓冲、BBR + fq、conntrack 收紧、`bridge-nf-call-*` 关闭、vm 调优 |
+| `files/etc/sysctl.d/99-memory-optimized.conf` | 内存回收水位 |
+| `files/etc/sysctl.d/99-bt-ppe-tuning.conf` | BT PPE sysctl |
+| `files/etc/hotplug.d/net/98-pppoe-rps` | PPPoE / `phy0-ap0` / `lan*` / `pon0` 的 RPS 与 `rps_flow_cnt` |
+| `files/etc/rc.local` | txqueuelen 5000、LLDP 放行、`airoha_eth` 硬中断分核、governor 锁 performance、PPE `bind_rate=5`、airoha-pond `oom_score_adj=-1000`、honk cgroup `memory.high`、zram 场景下 `vm.swappiness=20` |
+| `files/etc/sysupgrade.conf` | 保留 honk / tailscale / 自定义配置路径 |
 
----
+上游 `rc.local` 里"非 PPPoE 时强插 `fe80::1` 走 br-lan"那段已删除：会污染多机型拓扑。
 
-## 二、新增文件
+## 七、zram
 
-### 1. `.github/workflows/build-firmware-manual.yml`（新增，由上游 `build-zn504.yml` 改写）
+- 树里原本就设了 `system.zram_size_mb=256` + `zram_comp_algo=zstd` + 每日 `compact` cron，但 `CONFIG_PACKAGE_kmod-zram` 与 `zram-swap` 都没编，等于一堆死配置（上游因此把它们删掉）。
+- 现在反过来：`kmod-zram` + `zram-swap` 预装进**全部五台**机型，配置因此真正生效。`zram-swap` 的 init 默认容量是 `MemTotal/2048`（约半个 RAM），本树显式写成 256MB，压缩后实际占用约几十 MB；`vm.swappiness=20` 避免 page cache 被提前赶进压缩区。
+- 只有内核 swap 打开才有意义：`CONFIG_KERNEL_SWAP=y`（已确认）。
 
-- **基线**：直接沿用上游 `build-zn504.yml` 的全部骨架 —— 依赖安装列表、`dl` 缓存 key、`customize.sh`、`make download`、编译命令、ccache 存取、产物 sha256、Artifact 上传、Release 发布。
-- **触发**：删除 `push` 自动触发，只保留 `workflow_dispatch`（手动运行）；新增 `devices` 输入。
-- **相对上游的四处改动**：
-  1. 固件配置**保持上游原样**（只合 `an7581.config` + `release.config`），不选装自有包；
-  2. `make defconfig` 之后做机型锁定（先删掉全部 `CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_*`，再写入本次目标），之后**不再** `defconfig`（避免机型行被重算掉）；其它机型关闭后不再重复建 rootfs；
-  3. 产物收集的 `find` 加入 `*hg5382a*`（上游只匹配 `zn504*` / `hg5585f-ct*` / `hg5585f-cu*`，HG5382A 会被静默丢弃）；
-  4. 新增「Verify requested firmware exists」步骤，缺目标 `.itb` 直接失败。
-- **不做的事**：不合并 `configs/pon-packages/*.config`，不编自有应用与 kmod —— 这些只由包工作流产出，固件保持"内核能力齐全、体积干净"。
-- **输入**：`devices`（both / hg5585f-ct / hg5382a）、`cache_mode`、`upload_release`。
+## 八、软件仓库与分支
 
-### 2. `.github/workflows/build-packages-incremental.yml`（新增，仅手动）
+- 固件镜像里的 apk 源由 `fw-build.yml` 生成，分支由输入 `apk_repo_branch` 决定（默认 `repo`）；目录结构 `ponwrt-k<内核版本>/<common|usb|wifi|bt>/packages.adb`。
+- 多机型构建时不在构建期写死源，而是把「机型→能力」表与源前缀装进镜像，首次启动由 `96-ponwrt-apk-repos` 按 `board_name` 生成 `90-ponwrt-apk-repo.list`。
+- `pkg-publish.yml` 的 `idx_branch` 决定写哪个索引分支；`repo-wed` 从 `repo` 拉出，专供 WED 分支固件，避免实验 kmod 混进主线。
+- 签名：全仓库只用同一把 `APK_SIGNING_PRIVATE_KEY`，公钥指纹 `d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed`；`fw-build` 与 `pkg-publish` 都会断言。
 
-- **触发**：只有 `workflow_dispatch`。
-- **目的**：用**与固件完全相同的内核源码树与 .config** 编 kmod 与上层包，产物 apk 可直接装进固件。
-- **同 ABI 的做法**：
-  `tools/compile` → `toolchain/compile` → `target/linux/compile`（+`install`）→ `package/kernel/linux/compile` → 逐个 `package/<路径>/compile`。
-  kmod 的 vermagic 取自同一棵 `build_dir/target-*/linux-an7581/`，因此和固件逐字节一致。
-- **增量**：
-  1. `dl`、`.ccache`、`build_dir/host`、`staging_dir/host`、`build_dir/target-*`、`staging_dir/target-*` 全部走滚动缓存（key 带 `run_id`，`restore-keys` 前缀命中上一轮，因此每轮都能存、下一轮能续）；
-  2. 命中后 `make` 自身按时间戳跳过未变目标；
-  3. 输入 `only` 可只编指定 apk（例 `tempinfo,camlive`），单包改动只重编该包；
-  4. `cache_mode=完全重建` 可强制丢弃全部缓存。
-- **不静默丢弃**：按 `configs/pon-userspace-packages.txt` 逐包编译并核对真实 apk；目录缺失、无 apk 产出、编译失败都会让 job 失败，并把 OK/FAIL/SKIP 写进 `build_log/package-summary.txt` 与 Step Summary。
-- **输入**：`device`、`cache_mode`、`reuse_build_tree`、`only`、`with_kernel`（首次或改内核配置时必须 true）。
+## 九、软件包（不进镜像）
 
-### 3. `configs/pon-packages/*.config`（新增，7 个分类模块）
+- `tailscale` 加入 `configs/pon-userspace-packages.txt`，作为独立 apk 由包工作流产出、经 `pkg-publish` 入仓库；不预装进任何机型镜像。依赖的 `kmod-tun` 已在 `configs/an7581.config` 里常年 `=y`。
+- `honk`、`luci-app-honk` 同时在镜像（四台）与仓库里可装。
 
-原来一个 `pon-userspace.config` 里混装了「上层应用」和「kmod」，现在按类别拆成独立模块。**这些文件只由 `build-packages-incremental.yml` 合并**（`kconfig.pl + configs/an7581.config configs/release.config configs/pon-packages/*.config`），固件工作流不再引用——固件因此不带自有包，但内核能力由 `config-6.18` 与同树 kmod 包提供。合并顺序由文件名前缀决定，后面的可覆盖前面的。
+## 十、明确不做
 
-| 文件 | 内容 | 类型 |
-| --- | --- | --- |
-| `00-apps.config` | `tempinfo`、`camlive`、`go2rtc`、`gensio(+bin)`、`ser2net` 及对应 3 个 `luci-app-*` | 纯用户态应用 |
-| `10-usb.config` | USB 主机/XHCI/存储(UAS/extras)/串口(CH341,CP210X,FTDI,PL2303)/ACM/HID/网卡(cdc-ether,cdc-ncm,rtl8152,ax88179) | kmod |
-| `20-camera-audio.config` | UVC 摄像头（video-core/videobuf2/uvc）+ input-core + sound-core + usb-audio + `alsa-utils`/`alsa-lib` | kmod + 用户态 |
-| `30-bluetooth.config` | `kmod-bluetooth/btusb/btbcm/btmtk/hci-uart`、`bluez-daemon/libs/utils`、`libdbus`、`dbus`、`glib2`、`sbc`、自建 `bluez-alsa`、`luci-app-blueaudio`、`luci-app-btsp` | kmod + 用户态 |
-| `40-wlan-usb.config` | `kmod-rtw88*`、`rtl8xxxu`、`rtl8192cu`、`linux-firmware-rtw88` | kmod |
-| `50-fs-share.config` | `kmod-fs-ext4/vfat/exfat/ntfs3/cifs`、`kmod-fs-nfs(-common/-v4/-nfsd)`、`block-mount`、NFS 用户态（`nfs-kernel-server` 及 utils） | kmod + 用户态 |
-| `60-diagnostic.config` | `kmod-netlink-diag`、`kmod-inet-diag` | kmod |
-
-> 这些包名全部取自我们此前在 `ufo1cn/PonWrt-HG5382A` 上真实编过的清单，不是猜测名。
-> 想砍/加某一类（例如给 5382A 去掉 USB 类），只改对应模块文件即可，不必动工作流。
-
-### 4. `configs/pon-userspace-packages.txt`（新增）
-
-增量编译清单，格式 `<构建路径>|<apk 名>|<required|optional>`，顺序即编译顺序；当前清单无 `optional` 项。
-
-### 5. `package/pon-userspace/**`（新增，38 个文件）
-
-从旧仓库 `pon_userspace/` 迁移并整理：
-
-```
-package/pon-userspace/
-├── tempinfo/                 Makefile + files/tempinfo（LuCI 温度行取数脚本）
-├── camlive/                  Makefile + src/camlive.c（UVC 推流后端）
-├── go2rtc/                   Makefile + files/{go2rtc.init,go2rtc.config}
-├── gensio/                   Makefile（ser2net 的依赖，原 ser2net4/gensio）
-├── ser2net/                  Makefile + files/
-├── luci-app-camlive/         Makefile + root/（配置、init、controller、cbi、i18n）
-├── luci-app-go2rtc/          Makefile + root/（controller、cbi、view）
-├── luci-app-ser2net/         Makefile + luasrc/ + root/etc/config
-├── bluez-alsa/               Makefile（自建包：上游 arkq/bluez-alsa v4.3.1 源码构建）
-├── luci-app-blueaudio/       Makefile + root/（配置、init、controller、cbi、i18n）
-└── luci-app-btsp/            Makefile + root/
-```
-
-`bluez-alsa` 是本仓库**自己写的包定义**：`PKG_SOURCE_PROTO:=git` 指向上游 `https://github.com/arkq/bluez-alsa.git`，锁 `v4.3.1`，`PKG_FIXUP:=autoreconf`，只开 `--enable-aplay --enable-cli`，关掉 systemd/upower/man/test/a2dpconf/hcitop/rfcomm；产物 `bluealsa`、`bluealsa-aplay`、`bluealsa-cli` 与 ALSA 插件 `libasound_module_pcm_bluealsa.so`。不依赖任何第三方包仓库。
-
-`luci-app-blueaudio` 的 init 已改为匹配上游二进制：`bluealsa` 按 `a2dp-source + a2dp-sink`（HFP 模式再加 `hfp-ag/hfp-hf/hsp-ag/hsp-hs`）启动，`bluealsa-aplay` 用 `-D <output> --profile-a2dp`（HFP 时再加 `--profile-sco`）把声音转到本机 PCM，`output` 可在 LuCI 里填 `default` / `hw:1,0`。
-
-与原仓库的差异：旧仓库把这三个 ser2net 相关包放在 `pon_userspace/ser2net4/` 子目录、由工作流拆开部署；这里按 OpenWrt 多包目录规范拆平到 `package/pon-userspace/`，`make` 能直接按 `package/pon-userspace/<pkg>/compile` 增量编译。
-
-### 6. `patches/feeds/**`（新增，3 个文件）
-
-| 文件 | 来源 | 用途 |
-| --- | --- | --- |
-| `patches/feeds/pon_userspace/0001-gpon-luci.patch` | 旧仓库同名 | GPON 状态页 LuCI 集成，`customize.sh` 打进 `feeds/pon_userspace` |
-| `patches/feeds/pon_userspace/0002-add-luci-app-blueaudio.patch.bak` | 旧仓库同名 | **历史备份，原样保留**（`.bak` 扩展名不会被 `customize.sh` 的 `*.patch` 循环应用） |
-| `patches/feeds/pon_userspace/0003-add-luci-app-btsp.patch.bak` | 旧仓库同名 | 同上 |
-| `patches/feeds/pon_userspace/0004-add-luci-app-camlive.patch.bak` | 旧仓库同名 | 同上 |
-| `patches/feeds/pon_drivers/0001-gpon-full.patch` | 旧仓库同名 | GPON 驱动补丁 |
-| `patches/feeds/pon_drivers/rtl8723bu/Makefile` | 旧仓库同名 | 给 pon_drivers feed 增加 rtl8723bu 无线包定义 |
-
-旧仓库里的 `0002/0003/0004-add-luci-app-*.patch.bak` 是当年把 LuCI 前端塞进 `pon_userspace` feed 的备份方案；现在前端已作为独立包放在 `package/pon-userspace/`，这些 `.bak` **已一并迁回保留**（仅是历史备份，`.bak` 后缀不会被自动应用，也不会和独立包重复）。
-
----
-
-## 三、修改文件
-
-| 文件 | 改动 | 目的 |
-| --- | --- | --- |
-| `target/linux/airoha/an7581/config-6.18` | 末尾追加 5 行内核符号 | 见下 |
-| `scripts/customize.sh` | 新增第 8 节 | 应用 `patches/feeds/**`（feed 补丁 + rtl8723bu 包定义）；**不**再拉第三方 bluez-alsa |
-| `.github/workflows/build-zn504.yml` | 删除 `push` 触发块 | 上游原工作流改为只手动运行，防止提交即自动重编 |
-
-`config-6.18` 追加内容与理由（**方案 A：基础设施内置，功能驱动保持模块化**）：
-
-```
-CONFIG_DEBUG_FS / DEVMEM = y             tailscale/zerotier/honk/diskman 等应用依赖的调试接口
-CONFIG_NL80211_TESTMODE = y              cfg80211 在 CI 无 TTY 下 syncconfig 会卡死，必须显式定值
-```
-
-三条硬规则：
-
-1. **凡是有对应 kmod 包的能力，一律不写进 `config-6.18`**。写 `=y` 之后，`kmod-*` 包编出来就只剩空壳（936 B 那种），"后期装 apk 加功能"的路就断了。NFS / CIFS / USB 存储与串口 / 蓝牙 / UVC / rtw88 / netlink-diag / inet-diag 全部走 kmod（`=m`），由 `build-packages-incremental.yml` 用**同一内核树**编成 apk。
-2. **固件构建不再 merge `configs/pon-packages/*.config`**，只合 `an7581.config + release.config`。所以固件不带我们的自有包，但内核里该有的基础设施符号都在，apk 装上即用。
-3. **kmod 必须与固件同源**：包工作流在 `Configure` 之后多了一步 `Record kernel ABI pin`，输出 `output/build-info.txt`（`repo_commit` + `config_6_18_sha256` + `feeds_conf_sha256`），装 kmod 前对照固件构建的同一份值即可判定 ABI 是否匹配。
-
-> 如果某个功能后来确定"再也不会单独升级"，才把它从 kmod 侧挪到 `config-6.18` 写成 `=y` —— 这时要同步把 `configs/pon-packages/` 里对应的 `kmod-*` 行删掉，否则会同时产出空壳 apk。
-
----
-
-## 四、刻意未改的文件
-
-| 文件 | 为什么不动 |
-| --- | --- |
-| `.github/workflows/release.yml` | 上游发布流程与本次目标无关。 |
-| `configs/an7581.config` | `CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y` 与 `fiberhome_an4475-g2=y` 本来就已选中，机型定义在 `target/linux/airoha/image/an7581.mk` 里也完整；缺的只是**产物收集**，已在新增工作流里补上。 |
-| `target/linux/airoha/image/an7581.mk` | HG5382A 的 `Device/fiberhome_hg5382a` 与 `TARGET_DEVICES +=` 均存在，无需新增。 |
-| DTS / 分区表 / `scripts/integrate-temperature.py` | 分区与温度 RPC 已与我们的设备一致，本次不触碰。 |
-
----
-
-## 五、使用方式
-
-1. 固件：Actions → **Build PonWrt (HG5585F-CT & HG5382A) manual** → Run workflow，`devices` 选 `both`（或单个），首次建议 `cache_mode=使用缓存`、`upload_release=false`。
-2. 软件包：Actions → **Build Packages (same kernel tree, incremental) manual** → 选 `device`；首次或刚改过 `config-6.18` 时 `with_kernel=true`，之后可 `with_kernel=false` + `only=<apk 名>` 做单包增量。
-3. 三个工作流（含改造后的上游 `Build PonWrt (ZN504XG-D & HG5585F)`）都只有 `workflow_dispatch`，不点就绝不会跑。
-
-## 六、已知限制
-
-- `build_dir/target-*` / `staging_dir/target-*` 缓存体积可达数 GB，GitHub 单条缓存上限 10GB；保存步骤已设 `continue-on-error`，缓存超限不会让编译失败，只是下一轮退化为重新编译。
-- 三个工作流（两个新增 + 改造后的 `build-zn504.yml`）都只有 `workflow_dispatch`，不会因提交自动跑。
-- `bluez-alsa` 是自建包，尚未在 CI 实跑验证；若 configure 因 pkg-config 模块缺失失败，按报错补 `DEPENDS`（候选：`bluez.pc`←`bluez-libs`、`sbc.pc`←`sbc`、`dbus-1.pc`←`libdbus`/`dbus`、`glib-2.0.pc`/`gio-unix-2.0.pc`←`glib2`）。
-- NFS 已改回 kmod（方案 A），不再有内置导致的空壳 apk 问题；反过来，若以后把某项写进 `config-6.18` 的 `=y`，必须同时删掉 `configs/pon-packages/` 里对应的 `kmod-*` 行。
-
-## 七、变更历史
-
-1. 首版：fork 后一次性引入两个新工作流、配置、包源码、补丁与内核配置项。
-2. 二次修订（按用户要求）：
-   - 不引入第三方 `bluez-alsa`，移除 `luci-app-blueaudio`（包源码、选包、编译清单、customize.sh 注入全部删除）；
-   - 上游 `build-zn504.yml` 删除 `push` 触发，改为只手动；
-   - `build-firmware-manual.yml` 明确以 `build-zn504.yml` 为基线，保留其步骤骨架，仅改触发方式、配置合并、机型锁定与产物收集/校验。
-3. 三次修订（按用户要求）：
-   - **恢复蓝牙音频**，但不再用第三方仓库：自己写 `package/pon-userspace/bluez-alsa/Makefile`，从上游 `arkq/bluez-alsa` v4.3.1 源码构建；恢复 `luci-app-blueaudio`，init 改用上游 `bluealsa` + `bluealsa-aplay` 的 CLI；
-   - 选包配置由单个 `configs/pon-userspace.config` 拆成 `configs/pon-packages/` 下 7 个分类模块（应用 / USB / 摄像头音频 / 蓝牙 / 无线网卡 / 文件系统共享 / 诊断），工作流改为 `configs/pon-packages/*.config` 通配合并；
-   - 缓存 `hashFiles` 同步改为 `configs/**/*.config`，保证子目录里的模块改动也能命中新 key。
-5. 五次修订（方案 A：基础设施内置、功能驱动模块化）：
-   - `config-6.18` 只留 `CONFIG_DEBUG_FS/DEVMEM/NL80211_TESTMODE`，删掉 NFS 全链与 `CRYPTO_*`、`NETLINK_DIAG/INET_DIAG`（改回 kmod）；
-   - `build-firmware-manual.yml` 不再合并 `configs/pon-packages/*.config`，缓存 key 回到 `configs/*.config`；
-   - `build-packages-incremental.yml` 新增 `Record kernel ABI pin` 步骤，输出 `build-info.txt`（commit + config-6.18 sha256）；
-   - `50-fs-share.config` 恢复 `kmod-fs-nfs(-common/-v4/-nfsd)`，NFS 由 apk 按需安装。
-4. 四次修订：把旧仓库里 `0002/0003/0004-add-luci-app-*.patch.bak` 三份历史备份原样迁回 `patches/feeds/pon_userspace/`（`.bak` 不参与自动打补丁，仅保留源码历史）。
+- 不采纳上游 `configs/`（`an7581.config`、`release.config` 的改法）与任何上游 workflow（`build-zn504.yml` 等）。
+- 不做 plain 机型的全量预装（按能力预装）。
+- `bake_usb` 已废弃，不再用 usb 驱动是否预装来区分入口。
