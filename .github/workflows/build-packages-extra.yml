@@ -197,7 +197,7 @@ jobs:
       - name: Inject lyaml chain (luci-app-passwall2 的硬依赖)
         run: |
           set -euo pipefail
-          if find package feeds -maxdepth 4 -type d -name lyaml 2>/dev/null | grep -q .; then
+          if [ -n "$(find package feeds -maxdepth 4 -type d -name lyaml -print -quit 2>/dev/null)" ]; then
             echo ">>> 树里已有 lyaml，跳过注入"
             exit 0
           fi

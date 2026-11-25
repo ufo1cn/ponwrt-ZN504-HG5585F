@@ -832,13 +832,18 @@ jobs:
           n=$(ls -1 kmods/*.apk 2>/dev/null | wc -l)
           echo ">>> 收集到 apk：$n 个（本次编译产出的全部）"
           ls -1 kmods 2>/dev/null | head -n 60 || true
+          # 目录清单只取一次落盘：`ls | grep -q` 在 pipefail 下会因 SIGPIPE
+          # （grep 命中即退出、ls 写管道被杀 → 141）误判“文件不存在”，
+          # 不要再用管道判存在性。
+          KMODS_LIST=$(ls -1 kmods 2>/dev/null || true)
+          printf '%s\n' "$KMODS_LIST" > /tmp/kmods-list.txt
 
           # 期望清单硬校验：少一个就失败，不允许静默少包
           miss=0
           for want in kmod-fs-nfs kmod-fs-nfs-common kmod-fs-nfs-v4 kmod-fs-nfsd \
                       kmod-inet-diag kmod-netlink-diag kmod-iptv \
                       luci-app-iptv luci-i18n-iptv-zh-cn; do
-            if ! ls -1 kmods 2>/dev/null | grep -q "^${want}-[0-9]"; then
+            if ! grep -q "^${want}-[0-9]" /tmp/kmods-list.txt; then
               echo "::error::缺少 ${want} 的 apk（CONFIG_PACKAGE_${want}=m 未产出）"
               miss=1
             fi
@@ -864,7 +869,7 @@ jobs:
           missing_proxy=""
           { echo "### 代理 / VPN kmod 覆盖"; echo "| kmod | apk | 镜像(=y) |"; echo "|---|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
           for k in $proxy_list; do
-            apk=n; ls -1 kmods 2>/dev/null | grep -q "^${k}-[0-9]" && apk=y
+            apk=n; grep -q "^${k}-[0-9]" /tmp/kmods-list.txt && apk=y
             img=n; grep -q "^CONFIG_PACKAGE_${k}=y$" .config && img=y
             printf '| %s | %s | %s |\n' "$k" "$apk" "$img" >> "$GITHUB_STEP_SUMMARY"
             if [ "$apk" = n ] && [ "$img" = n ]; then missing_proxy="$missing_proxy $k"; fi
