@@ -15,6 +15,11 @@ PKG_LICENSE_FILES:=LICENSE
 
 include $(INCLUDE_DIR)/package.mk
 
+# v2ray-geoip / v2ray-geosite 只是运行期数据包（提供 /usr/share/v2ray/*.dat，
+# 本包 install 段仅软链过去），不是编译期必需。写成硬 +v2ray-geoip/+v2ray-geosite
+# 时，构建树里没有对应 feed 就会被 kconfig 隐藏整个 honk（连带 luci-app-honk），
+# 镜像阶段 apk add 报 no such package。改用 PACKAGE_xxx 条件依赖：有数据包就带上，
+# 没有也能照常编译。
 define Package/honk
   SECTION:=net
   CATEGORY:=Network
@@ -24,7 +29,8 @@ define Package/honk
   LICENSE:=GPL-3.0-only
   DEPENDS:=@(aarch64||x86_64) +kmod-veth +kmod-sched-core +kmod-sched-bpf \
            +kmod-nft-core +kmod-nft-queue +kmod-nfnetlink-queue \
-           +kmod-nf-conntrack +bpftool +ip-full +v2ray-geoip +v2ray-geosite \
+           +kmod-nf-conntrack +bpftool +ip-full \
+           +PACKAGE_v2ray-geoip:v2ray-geoip +PACKAGE_v2ray-geosite:v2ray-geosite \
            +curl +tar +ca-bundle
 endef
 
