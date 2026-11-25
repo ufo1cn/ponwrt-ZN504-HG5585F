@@ -59,11 +59,12 @@ jobs:
           python3 - <<'PY'
           import os, subprocess, sys
 
-          # 机型 -> 入口工作流（产物名里都带完整机型名）
+          # 三台机型现在由同一个入口 fw-all.yml 一次构建，一个 artifact 带三份镜像；
+          # 机型只用于挑选 artifact 里的哪个 .itb。
           MAP = {
-              'fiberhome_hg5585f-ct': 'fw-usb-wifi.yml',
-              'fiberhome_hg5382a': 'fw-plain.yml',
-              'nokia_xg-040g-md-ubi': 'fw-usb.yml',
+              'fiberhome_hg5585f-ct': 'fw-all.yml',
+              'fiberhome_hg5382a': 'fw-all.yml',
+              'nokia_xg-040g-md-ubi': 'fw-all.yml',
           }
           SEL = os.environ['SEL']
           SRC = os.environ['SRC_REPO']
@@ -121,10 +122,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # 一次构建三机型：同一个 run 只下一次，三台共用这份 dl/run-<rid>
+          declare -A got_rid
           while IFS=$'\t' read -r dev wf rid rnum sha created; do
-            echo ">>> 下载 $dev 的产物（run #$rnum / $rid）"
-            mkdir -p "dl/$dev"
-            gh run download "$rid" -R "$SRC_REPO" -D "dl/$dev"
+            if [ -z "${got_rid[$rid]:-}" ]; then
+              echo ">>> 下载 run #$rnum / $rid 的全部机型产物"
+              mkdir -p "dl/run-$rid"
+              gh run download "$rid" -R "$SRC_REPO" -D "dl/run-$rid"
+              got_rid[$rid]=1
+            fi
           done < plan.tsv
           du -sh dl/* | sed 's/^/    /'
 
@@ -171,7 +177,7 @@ jobs:
           prepared = []
           errors = []
           for dev, wf, rid, rnum, commit, created in plan:
-              root = os.path.join('dl', dev)
+              root = os.path.join('dl', 'run-' + rid)
               itbs, infos = [], []
               for base, _, files in os.walk(root):
                   for fn in files:
