@@ -1,0 +1,88 @@
+#!/bin/sh
+# oaf-offload —— 在 OAF（应用过滤）与硬件流卸载之间来回切，切回来时按原值恢复
+#
+# 用法：
+#   oaf-offload on       进入 OAF 模式：先把当前 firewall 卸载设置存起来，
+#                        再关掉 flow_offloading / flow_offloading_hw / fullcone，
+#                        清空 conntrack，让已加速的流立刻失效
+#   oaf-offload restore  退出 OAF 模式：把存起来的原始值原样写回（原本没有的字段就删掉），
+#                        再清空 conntrack。没有存过原值时不动任何配置
+#   oaf-offload status   查看当前值，以及是否存过原始值
+#
+# 为什么要来回切：硬件卸载把已识别的流转给 PPE 直通，后续报文不再经过 netfilter，
+# OAF 挂在 pre-routing（priority -199）上的 DPI 就看不到报文内容，识别失效。
+# 两者互斥，只能让路。
+#
+# 原始值存在 /etc/oaf-offload.state，随配置分区持久化，重启后仍能 restore。
+
+STATE=/etc/oaf-offload.state
+KEY="firewall.@defaults[0]"
+
+get() { uci -q get "$KEY.$1"; }
+
+flush_ct() {
+	if command -v conntrack >/dev/null 2>&1 && conntrack -F >/dev/null 2>&1; then
+		return 0
+	fi
+	if [ -e /proc/net/nf_conntrack ]; then
+		echo f > /proc/net/nf_conntrack 2>/dev/null
+	fi
+}
+
+reload_fw() { /etc/init.d/firewall reload >/dev/null 2>&1 || /etc/init.d/firewall restart >/dev/null 2>&1; }
+
+# $1 字段名，$2 值；值为空表示原本没有这个字段，删掉即还原
+set_field() {
+	uci -q delete "$KEY.$1"
+	[ -n "$2" ] && uci -q set "$KEY.$1=$2"
+}
+
+case "$1" in
+on)
+	if [ ! -f "$STATE" ]; then
+		umask 077
+		{
+			printf 'flow_offloading=%s\n' "$(get flow_offloading)"
+			printf 'flow_offloading_hw=%s\n' "$(get flow_offloading_hw)"
+			printf 'fullcone=%s\n' "$(get fullcone)"
+		} > "$STATE"
+	fi
+	uci -q set "$KEY.flow_offloading=0"
+	uci -q set "$KEY.flow_offloading_hw=0"
+	uci -q set "$KEY.fullcone=0"
+	uci -q commit firewall
+	reload_fw
+	flush_ct
+	echo "oaf-offload: OAF 模式已生效，硬件卸载已关闭（原值已保存）"
+	;;
+restore|off)
+	if [ ! -f "$STATE" ]; then
+		echo "oaf-offload: 没有保存过原始值，不做任何改动"
+		exit 0
+	fi
+	. "$STATE"
+	set_field flow_offloading "${flow_offloading:-}"
+	set_field flow_offloading_hw "${flow_offloading_hw:-}"
+	set_field fullcone "${fullcone:-}"
+	uci -q commit firewall
+	rm -f "$STATE"
+	reload_fw
+	flush_ct
+	echo "oaf-offload: 已按切换前的原值恢复硬件卸载设置"
+	;;
+status)
+	echo "flow_offloading=$(get flow_offloading)"
+	echo "flow_offloading_hw=$(get flow_offloading_hw)"
+	echo "fullcone=$(get fullcone)"
+	if [ -f "$STATE" ]; then
+		echo "--- 已保存的原始值 ---"
+		cat "$STATE"
+	else
+		echo "--- 没有保存原始值 ---"
+	fi
+	;;
+*)
+	echo "用法: oaf-offload on|restore|status" >&2
+	exit 1
+	;;
+esac
