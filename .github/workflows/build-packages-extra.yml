@@ -336,11 +336,15 @@ jobs:
           # 设计口径：kmod 只由 fw-build 编（与固件同树同配置，vermagic 一致）。
           # 这里把 .config 里的 kmod 选择全部摘掉，包构建就不会再被
           # package/kernel/gpio-button-hotplug 之类的依赖拉进内核编译。
-          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug)=[my]/d' .config
-          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug) is not set/d' .config
-          left=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
-          echo ">>> 剩余 kmod 选择：${left:-0}"
-          [ "${left:-0}" -eq 0 ] || { echo "::error::.config 里仍有 kmod 选择，会触发内核编译"; exit 1; }
+          # kernel 元包与 kmod-* 同属 package/kernel/linux：只要 .config 里还留着
+          # CONFIG_PACKAGE_kernel=y，任何 make package/.../compile 都会顺着依赖去
+          # 构建 package/kernel/linux；本流程没有内核树与 target 内核配置，必然报
+          # ERROR: package/kernel/linux failed to build。所以 kernel 也一并摘掉。
+          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=[my]/d' .config
+          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel) is not set/d' .config
+          left=$(grep -cE '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true)
+          echo ">>> 剩余 kmod / kernel 选择：${left:-0}"
+          [ "${left:-0}" -eq 0 ] || { grep -E '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true; echo "::error::.config 里仍有 kmod 或 kernel 选择，会触发内核编译"; exit 1; }
 
       - name: Build host tools and toolchain
         run: |
@@ -402,12 +406,14 @@ jobs:
             echo "::error::重建包元数据失败（oldconfig）"
             exit 1
           }
-          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug)=[my]/d' .config
-          left=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
-          echo ">>> 元数据重建后剩余 kmod 选择：${left:-0}"
+          # oldconfig 会把 CONFIG_PACKAGE_kernel 之类的默认选项写回来，必须再摘一次
+          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=[my]/d' .config
+          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|kernel) is not set/d' .config
+          left=$(grep -cE '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true)
+          echo ">>> 元数据重建后剩余 kmod / kernel 选择：${left:-0}"
           [ "${left:-0}" -eq 0 ] || {
-            grep -E '^CONFIG_PACKAGE_kmod-' .config || true
-            echo "::error::重建包元数据后 .config 仍带 kmod 选择"
+            grep -E '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true
+            echo "::error::重建包元数据后 .config 仍带 kmod 或 kernel 选择"
             exit 1
           }
 
