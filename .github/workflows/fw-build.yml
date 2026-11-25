@@ -685,6 +685,12 @@ jobs:
             echo ">>> 多机型：源列表改为首次启动按机型能力生成"
             cat package/base-files/files/etc/ponwrt-device-caps.txt
           else
+            # 单机型也带能力表：应用侧按 board_name 查能力来展示，不能只在多机型时有
+            : > package/base-files/files/etc/ponwrt-device-caps.txt
+            for dev in $TARGET_DEVS; do
+              printf '%s %s\n' "$dev" "$(caps_of "$dev")" >> package/base-files/files/etc/ponwrt-device-caps.txt
+            done
+            cat package/base-files/files/etc/ponwrt-device-caps.txt
             caps=""
             for c in $(caps_of "$TARGET_DEVS"); do
               case " $caps " in *" $c "*) ;; *) caps="$caps $c" ;; esac
