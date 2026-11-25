@@ -15,6 +15,8 @@ on:
           - all
           - ct+5382a
           - hg5585f-ct
+          - hg5585f-ct-usb-sfp
+          - zn504xg-d
           - hg5382a
           - xg040md
         default: all
@@ -63,8 +65,10 @@ jobs:
           # 机型只用于挑选 artifact 里的哪个 .itb。
           MAP = {
               'fiberhome_hg5585f-ct': 'fw-all.yml',
+              'fiberhome_hg5585f-ct-usb-sfp': 'fw-all.yml',
               'fiberhome_hg5382a': 'fw-all.yml',
               'nokia_xg-040g-md-ubi': 'fw-all.yml',
+              'znxt_zn504xg-d': 'fw-all.yml',
           }
           SEL = os.environ['SEL']
           SRC = os.environ['SRC_REPO']
@@ -76,8 +80,12 @@ jobs:
               devices = ['fiberhome_hg5585f-ct', 'fiberhome_hg5382a']
           elif SEL == 'hg5585f-ct':
               devices = ['fiberhome_hg5585f-ct']
+          elif SEL == 'hg5585f-ct-usb-sfp':
+              devices = ['fiberhome_hg5585f-ct-usb-sfp']
           elif SEL == 'hg5382a':
               devices = ['fiberhome_hg5382a']
+          elif SEL == 'zn504xg-d':
+              devices = ['znxt_zn504xg-d']
           elif SEL == 'xg040md':
               devices = ['nokia_xg-040g-md-ubi']
           else:
@@ -145,8 +153,10 @@ jobs:
 
           DEV_LABEL = {
               'fiberhome_hg5585f-ct': 'HG5585F-CT',
+              'fiberhome_hg5585f-ct-usb-sfp': 'HG5585F-CT (USB-SFP)',
               'fiberhome_hg5382a': 'HG5382A',
               'nokia_xg-040g-md-ubi': 'XG-040G-MD',
+              'znxt_zn504xg-d': 'ZN504XG-D',
           }
 
           def sha256(path):
@@ -184,7 +194,9 @@ jobs:
                       p = os.path.join(base, fn)
                       # SFP 变体的机器名是 fiberhome_hg5585f-ct 的前缀扩展，必须排除
                       if fn.endswith('.itb') and 'sysupgrade' in fn and not fn.endswith('.itb.sha256'):
-                          if dev in fn and 'sfp' not in fn:
+                          # 光口版与电口版共用前缀，必须按是否带 usb-sfp 区分
+                          sfp_want = 'usb-sfp' in dev
+                          if dev in fn and ('usb-sfp' in fn) == sfp_want:
                               itbs.append(p)
                       if fn == 'build-info.txt':
                           infos.append(p)
