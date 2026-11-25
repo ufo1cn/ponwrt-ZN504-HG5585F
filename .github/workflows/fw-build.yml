@@ -89,6 +89,7 @@ jobs:
           DEVICES="${{ inputs.device_list }}"
           [ -n "${DEVICES// /}" ] || { echo "::error::device_list 为空"; exit 1; }
           : > /tmp/dev-pre.tsv
+          : > /tmp/dev-caps.tsv
           caps_all=""
           for dev in $DEVICES; do
             f="configs/devices/${dev}.config"
@@ -96,6 +97,7 @@ jobs:
             caps=$(sed -n 's/^DEVICE_CAPS=//p' "$f" | head -n1)
             pre=$(sed -n 's/^DEVICE_PREINSTALL=//p' "$f" | head -n1)
             printf '%s\t%s\n' "$dev" "${pre:-}" >> /tmp/dev-pre.tsv
+            printf '%s\t%s\n' "$dev" "${caps:-}" >> /tmp/dev-caps.tsv
             echo ">>> $dev 能力：${caps:-（无）}；预装包 $(echo ${pre:-} | wc -w) 个"
             for c in $caps; do
               case " $caps_all " in *" $c "*) ;; *) caps_all="$caps_all $c" ;; esac
@@ -272,7 +274,7 @@ jobs:
           # ------------------------------------------------------------------
           # 机型能力 -> 配置片段（configs/features/<能力>.config）
           #
-          #   能力表 = configs/device-features.txt（<机型>|<能力...>）。
+          #   能力表 = configs/devices/<board>.config（DEVICE_CAPS / DEVICE_PREINSTALL）。
           #   【顺序很重要】片段必须在 make defconfig 之前写进 .config：
           #   defconfig 是唯一一次让 kconfig 解析 DEPENDS 的机会，隐藏包
           #   （HIDDEN:=1）、条件包（@USE_XXX）以及 +kmod-* 提供者只有在这一步
@@ -320,6 +322,14 @@ jobs:
                 case "$sym" in
                   CONFIG_PACKAGE_kmod-*) continue ;;
                 esac
+                # 多机型：任何 CONFIG_PACKAGE_*=y 都会进每一台镜像，所以一律不写全局，
+                # 交给 configs/devices/<board>.config 的 DEVICE_PREINSTALL 按机型装。
+                # 只保留非包符号（如 CONFIG_BUSYBOX_CONFIG_*）——那些是内核/基础工具选项。
+                if [ "${N_DEV:-1}" -gt 1 ]; then
+                  case "$sym" in
+                    CONFIG_PACKAGE_*) continue ;;
+                  esac
+                fi
               fi
               sed -i "/^${sym}=/d; /^# ${sym} is not set/d" .config
               if [ "$val" = "notset" ]; then
@@ -546,8 +556,17 @@ jobs:
               grep -q "^CONFIG_PACKAGE_${s}=[ym]" .config \
                 || { echo "::error::usb 能力已启用，但 ${s} 没被选中（识别到卷也挂不上）"; exit 1; }
             done
-            grep -q '^CONFIG_PACKAGE_block-mount=y' .config \
-              || { echo "::error::usb 能力已启用，但 block-mount 不是 =y（没有热插拔挂载脚本）"; exit 1; }
+            # block-mount：单机型写全局 =y；多机型要求出现在每个 usb 机型的预装清单里
+            if [ "${N_DEV:-1}" -gt 1 ]; then
+              for dev in $(awk '$2 ~ /usb/ {print $1}' /tmp/dev-caps.tsv); do
+                grep -q 'block-mount' "configs/devices/${dev}.config" \
+                  || { echo "::error::${dev} 有 usb 能力，但 DEVICE_PREINSTALL 里没有 block-mount（没有热插拔挂载脚本）"; exit 1; }
+              done
+              echo ">>> 多机型：block-mount 已按机型预装（$(awk '$2 ~ /usb/ {print $1}' /tmp/dev-caps.tsv | tr '\n' ' ')）"
+            else
+              grep -q '^CONFIG_PACKAGE_block-mount=y' .config \
+                || { echo "::error::usb 能力已启用，但 block-mount 不是 =y（没有热插拔挂载脚本）"; exit 1; }
+            fi
             # btrfs 只出 apk，禁止被烘进镜像（体积考虑）
             if ! grep -q '^CONFIG_PACKAGE_kmod-fs-btrfs=m' .config; then
               echo ">>> 诊断：.config 里的 btrfs / 依赖相关行"
@@ -560,9 +579,14 @@ jobs:
           if has_cap wifi; then
             grep -q "^CONFIG_PACKAGE_kmod-mt7915e=[ym]" .config \
               || { echo "::error::wifi 能力已启用，但 kmod-mt7915e 没被选中"; exit 1; }
-            grep -q "kmod-mt7915e" "configs/devices/${DEVICES%% *}.config" \
-              || { echo "::error::wifi 能力已启用，但机型定义的 DEVICE_PREINSTALL 里没有 kmod-mt7915e（驱动不会进镜像）"; exit 1; }
-            echo ">>> wifi 能力：内置无线已编出，并按机型定义预装进镜像"
+            # 有 wifi 能力的机型，其 DEVICE_PREINSTALL 必须包含内置无线驱动
+            wifi_devs=$(awk '$2 ~ /wifi/ {print $1}' /tmp/dev-caps.tsv)
+            [ -n "$wifi_devs" ] || { echo "::error::能力表说 wifi，但没有任何机型被标成 wifi"; exit 1; }
+            for dev in $wifi_devs; do
+              grep -q "kmod-mt7915e" "configs/devices/${dev}.config" \
+                || { echo "::error::${dev} 有 wifi 能力，但 DEVICE_PREINSTALL 里没有 kmod-mt7915e（驱动不会进镜像）"; exit 1; }
+            done
+            echo ">>> wifi 能力：内置无线已编出，并按机型定义预装（$wifi_devs）"
           else
             for s in kmod-mt7915e kmod-mt7916-firmware; do
               line=$(grep -E "CONFIG_PACKAGE_${s}(=| is not set)" .config | head -n1 || true)
@@ -594,10 +618,9 @@ jobs:
           # 不清掉的话镜像里 /etc/apk/keys/public-key.pem 还是旧 key。
           TARGET_DEVS="${{ inputs.device_list }}"
           n_dev=$(echo "$TARGET_DEVS" | wc -w)
-          [ "$n_dev" -eq 1 ] || echo "::warning::本次一台以上机型：repositories.d 按能力并集写（要严格隔离请用单机型工作流）"
           # 源地址按【本次内核版本 + 能力】分目录：apk 的兼容键是 arch+libc+vermagic，
           # 与机型无关，所以主目录按 kver 分、能力再分子目录（common / usb / wifi / bt…）。
-          # 机型 -> 能力 的映射见 configs/device-features.txt；没写的机型只挂 common。
+          # 机型 -> 能力 的映射只来一份：configs/devices/<board>.config 的 DEVICE_CAPS。
           pv=$(awk -F':=' '/^KERNEL_PATCHVER/ {print $2; exit}' target/linux/airoha/Makefile | tr -d '[:space:]')
           suf=$(awk -v p="$pv" '$1=="LINUX_VERSION-"p {gsub(/ /,"",$3); print $3; exit}' "target/linux/generic/kernel-$pv")
           KVER="${pv}${suf}"
@@ -605,42 +628,60 @@ jobs:
           echo ">>> 预计算内核版本 KVER=$KVER"
           echo "KVER=$KVER" >> "$GITHUB_ENV"
           RAW="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt-k${KVER}"
-          features_of() {
-            local dev line block out
-            dev="$1"; out=""
-            line=$(grep -E "^[[:space:]]*${dev}[[:space:]]*\|" configs/device-features.txt 2>/dev/null | head -n1 || true)
-            if [ -n "$line" ]; then printf '%s' "${line#*|}"; return 0; fi
-            # 兜底：从机型 profile 的 DEVICE_PACKAGES 推能力
-            block=$(awk -v d="$dev" 'index($0,"define Device/" d)==1 {f=1;next} f&&/^endef/{exit} f' target/linux/airoha/image/*.mk 2>/dev/null || true)
-            if echo "$block" | grep -qiE 'kmod-usb'; then out="$out usb"; fi
-            if echo "$block" | grep -qiE 'kmod-(rtw88|rtl8|mt76|ath9k|ath10|ath11|iwlwifi)'; then out="$out wifi"; fi
-            if echo "$block" | grep -qiE 'kmod-(btusb|bluetooth)|bluez'; then out="$out bt"; fi
-            printf '%s' "$out"
-          }
-          caps=""
-          for dev in $TARGET_DEVS; do
-            for c in $(features_of "$dev"); do
+          caps_of() { awk -v d="$1" '$1==d { $1=""; sub(/^[ \t]+/,""); print; exit }' /tmp/dev-caps.tsv; }
+          mkdir -p package/base-files/files/etc/apk/repositories.d
+          if [ "$n_dev" -gt 1 ]; then
+            # 一次构建多机型：rootfs 是共用的，不能把某一台的能力源写死进所有镜像。
+            # 把「机型 -> 能力」表和源前缀装进镜像，首次启动按本机 board_name 生成列表。
+            : > package/base-files/files/etc/ponwrt-device-caps.txt
+            for dev in $TARGET_DEVS; do
+              printf '%s %s\n' "$dev" "$(caps_of "$dev")" >> package/base-files/files/etc/ponwrt-device-caps.txt
+            done
+            printf '%s\n' "$RAW" > package/base-files/files/etc/ponwrt-repo-base.txt
+            cat > package/base-files/files/etc/uci-defaults/96-ponwrt-apk-repos <<'SH'
+          #!/bin/sh
+          # 首次启动：按本机 board_name 查机型能力，生成 apk 源列表
+          # 机型能力表在 /etc/ponwrt-device-caps.txt，源前缀在 /etc/ponwrt-repo-base.txt
+          board=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+          base=$(cat /etc/ponwrt-repo-base.txt 2>/dev/null)
+          [ -n "$base" ] || exit 0
+          caps=$(awk -v b="$board" '$1==b { $1=""; sub(/^[ \t]+/,""); print; exit }' /etc/ponwrt-device-caps.txt 2>/dev/null)
+          d=/etc/apk/repositories.d
+          mkdir -p "$d"
+          {
+            echo "# PonWrt 在线源（按机型能力生成：$board）"
+            echo "$base/common/packages.adb"
+            for c in $caps; do echo "$base/$c/packages.adb"; done
+          } > "$d/90-ponwrt-apk-repo.list"
+          echo "ponwrt: apk 源已按机型生成（$board -> ${caps:-common only}）"
+          exit 0
+          SH
+            chmod +x package/base-files/files/etc/uci-defaults/96-ponwrt-apk-repos
+            echo ">>> 多机型：源列表改为首次启动按机型能力生成"
+            cat package/base-files/files/etc/ponwrt-device-caps.txt
+          else
+            caps=""
+            for c in $(caps_of "$TARGET_DEVS"); do
               case " $caps " in *" $c "*) ;; *) caps="$caps $c" ;; esac
             done
-          done
-          echo ">>> 目标机型 $TARGET_DEVS 能力：${caps:-（仅 common）}"
-          mkdir -p package/base-files/files/etc/apk/repositories.d
-          lines=()
-          if curl -fsI --max-time 25 "$RAW/common/packages.adb" >/dev/null 2>&1; then
-            lines+=("# PonWrt 在线源（内核 $KVER / 通用包；与固件同一把私钥签名）" "$RAW/common/packages.adb")
-            for c in $caps; do
-              if curl -fsI --max-time 25 "$RAW/$c/packages.adb" >/dev/null 2>&1; then
-                lines+=("# PonWrt 在线源（内核 $KVER / 能力 $c）" "$RAW/$c/packages.adb")
-              else
-                echo "::warning::仓库还没有 ponwrt-k${KVER}/$c 索引，本次跳过该能力源"
-              fi
-            done
-          else
-            echo "::warning::仓库还没有 ponwrt-k${KVER}/common 索引，回退旧目录（用户态包与内核无关，可继续用）"
-            lines+=("# PonWrt 在线源（旧目录，未按内核版本分；kmod 不要从这里装）" "https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt/packages.adb")
+            echo ">>> 目标机型 $TARGET_DEVS 能力：${caps:-（仅 common）}"
+            lines=()
+            if curl -fsI --max-time 25 "$RAW/common/packages.adb" >/dev/null 2>&1; then
+              lines+=("# PonWrt 在线源（内核 $KVER / 通用包；与固件同一把私钥签名）" "$RAW/common/packages.adb")
+              for c in $caps; do
+                if curl -fsI --max-time 25 "$RAW/$c/packages.adb" >/dev/null 2>&1; then
+                  lines+=("# PonWrt 在线源（内核 $KVER / 能力 $c）" "$RAW/$c/packages.adb")
+                else
+                  echo "::warning::仓库还没有 ponwrt-k${KVER}/$c 索引，本次跳过该能力源"
+                fi
+              done
+            else
+              echo "::warning::仓库还没有 ponwrt-k${KVER}/common 索引，回退旧目录（用户态包与内核无关，可继续用）"
+              lines+=("# PonWrt 在线源（旧目录，未按内核版本分；kmod 不要从这里装）" "https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/repo/aarch64_cortex-a53/ponwrt/packages.adb")
+            fi
+            printf '%s\n' "${lines[@]}" > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
+            cat package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
           fi
-          printf '%s\n' "${lines[@]}" > package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
-          cat package/base-files/files/etc/apk/repositories.d/90-ponwrt-apk-repo.list
 
           rm -rf build_dir/target-*/base-files* || true
           find build_dir/target-* -maxdepth 3 -name '*base-files*' -path '*stamp*' -exec rm -rf {} + 2>/dev/null || true
@@ -758,78 +799,68 @@ jobs:
       - name: Verify image honors device capabilities
         run: |
           set -uo pipefail
-          CAPS="${CAPS:-}"
-          echo ">>> 本次机型能力: ${CAPS:-（无）}"
-          has_cap() { case " $CAPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac ; }
-          root=$(ls -d build_dir/target-*/root-* 2>/dev/null | head -n1 || true)
-          [ -n "$root" ] || { echo "::error::找不到 rootfs 目录（build_dir/target-*/root-*）"; exit 1; }
-          echo ">>> rootfs: $root"
+          # 一次构建多机型：每个 DEVICE 都有自己的 rootfs（build_dir/target-*/root-<profile>），
+          # 按机型逐个核对。能力取自 configs/devices/<board>.config（经 /tmp/dev-caps.tsv 传过来），
+          # 所以“哪台该带 USB、哪台该带无线”只以机型定义文件为准。
           fail=0
-
-          # 只统计真正的无线驱动/固件：/lib/modules 下的 mt7915e/mt7916 kmod 和
-          # /lib/firmware 下的 mt7916 固件。base-files 里的 mt7916-* 平台脚本与
-          # sku 表是无条件存在的，不能作为"带了无线"的证据（曾经因此假失败）。
-          wifi_found=$(
-            { find "$root/lib/modules" -name 'mt7915e.ko*' -o -name 'mt7916*.ko*' 2>/dev/null
-              find "$root/lib/firmware" -name 'mt7916*' 2>/dev/null
-            } | head -n5 || true
-          )
-          if has_cap wifi; then
-            if [ -z "$wifi_found" ]; then
-              echo "::error::机型能力含 wifi，但 rootfs 里找不到 mt7915e/mt7916 驱动（内置无线没进镜像）"
-              fail=1
-            else
-              echo ">>> wifi 能力核对通过：$(echo "$wifi_found" | head -n1)"
-            fi
-          else
-            if [ -n "$wifi_found" ]; then
-              echo "::error::机型能力不含 wifi，但 rootfs 里带了无线驱动："
-              echo "$wifi_found" | sed 's/^/    /'
-              fail=1
-            else
-              echo ">>> 无 wifi 能力核对通过：rootfs 里没有 mt7915e/mt7916"
-            fi
-          fi
-
-          usb_found=$(find "$root" -name 'usb-common.ko*' 2>/dev/null | head -n5 || true)
-          if has_cap usb; then
-            for m in exfat.ko snd-usb-audio.ko; do
-              if find "$root" -name "$m*" 2>/dev/null | grep -q .; then
-                echo ">>> 预装核对: $m 已在镜像里"
-              else
-                echo "::error::机型能力含 usb，但 rootfs 里没有 $m（configs/devices/*.config 的 DEVICE_PREINSTALL 没落地）"
-                fail=1
-              fi
+          DEVICES="${{ inputs.device_list }}"
+          roots=$(ls -d build_dir/target-*/root-* 2>/dev/null || true)
+          [ -n "$roots" ] || { echo "::error::找不到 rootfs 目录（build_dir/target-*/root-*）"; exit 1; }
+          echo ">>> rootfs 目录："
+          echo "$roots" | sed 's/^/    /'
+          for dev in $DEVICES; do
+            caps=$(awk -v d="$dev" '$1==d { $1=""; sub(/^[ \t]+/,""); print; exit }' /tmp/dev-caps.tsv)
+            root=""
+            for r in $roots; do
+              case "$(basename "$r")" in
+                *"$dev"*) [ ${#r} -gt ${#root} ] && root="$r" ;;
+              esac
             done
-            # USB 无线网卡（rtw88 USB 栈）必须真的落地，否则 DEVICE_PREINSTALL 里的 kmod-rtw88-* 就是被 kconfig 静默丢掉的
-            for m in rtw88_usb.ko rtw88_8822cu.ko rtw88_8821cu.ko; do
-              if find "$root" -name "$m*" 2>/dev/null | grep -q .; then
-                echo ">>> 预装核对: $m 已在镜像里"
-              else
-                echo "::error::机型能力含 usb，但 rootfs 里没有 $m（rtw88 USB 无线网卡符号被静默丢弃）"
-                fail=1
-              fi
-            done
-            echo ">>> rtw88 模块实到：$(find "$root" -name 'rtw88*.ko*' -printf '%f ' 2>/dev/null || true)"
-          fi
-          if has_cap usb; then
-            if [ -z "$usb_found" ]; then
-              echo "::error::机型能力含 usb，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
-              fail=1
-            else
-              echo ">>> usb 能力核对通过：$(echo "$usb_found" | head -n1)"
+            if [ -z "$root" ]; then
+              echo "::warning::${dev} 找不到同名 rootfs 目录，跳过该机型的镜像内容核对"
+              continue
             fi
-          else
-            if [ -n "$usb_found" ]; then
-              echo "::error::机型能力不含 usb，但 rootfs 里带了 USB 栈："
-              echo "$usb_found" | sed 's/^/    /'
-              fail=1
-            else
-              echo ">>> 无 usb 能力核对通过：rootfs 里没有 USB 栈"
-            fi
-          fi
+            echo ">>> ${dev}（能力：${caps:-无}）rootfs=$root"
+            wifi_found=$( { find "$root/lib/modules" -name 'mt7915e.ko*' -o -name 'mt7916*.ko*' 2>/dev/null
+                            find "$root/lib/firmware" -name 'mt7916*' 2>/dev/null; } | head -n5 || true)
+            case " $caps " in
+              *" wifi "*)
+                if [ -z "$wifi_found" ]; then
+                  echo "::error::${dev} 有 wifi 能力，但 rootfs 里没有 mt7915e/mt7916"
+                  fail=1
+                else
+                  echo "     wifi OK: $(echo "$wifi_found" | head -n1)"
+                fi ;;
+              *)
+                if [ -n "$wifi_found" ]; then
+                  echo "::error::${dev} 没有 wifi 能力，但 rootfs 带了无线驱动："
+                  echo "$wifi_found" | sed 's/^/      /'
+                  fail=1
+                else
+                  echo "     无 wifi：rootfs 干净"
+                fi ;;
+            esac
+            usb_found=$(find "$root" -name 'usb-common.ko*' 2>/dev/null | head -n1 || true)
+            exfat_found=$(find "$root" -name 'exfat.ko*' 2>/dev/null | head -n1 || true)
+            case " $caps " in
+              *" usb "*)
+                if [ -z "$usb_found" ]; then
+                  echo "::error::${dev} 有 usb 能力，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
+                  fail=1
+                else
+                  echo "     usb OK: $usb_found"
+                fi
+                [ -n "$exfat_found" ] || { echo "::error::${dev} 有 usb 能力，但 rootfs 里没有 exfat.ko（U 盘挂不上）"; fail=1; } ;;
+              *)
+                if [ -n "$usb_found" ]; then
+                  echo "::error::${dev} 没有 usb 能力，但 rootfs 带了 USB 栈：$usb_found"
+                  fail=1
+                else
+                  echo "     无 usb：rootfs 干净"
+                fi ;;
+            esac
+          done
           exit $fail
-
       - name: Record build provenance (源码 commit + 内核版本)
         run: |
           set -euo pipefail
@@ -929,11 +960,24 @@ jobs:
           f2=$(ls build_dir/target-*/root-*/etc/ponwrt-apk-repo.conf 2>/dev/null | head -n1 || true)
           [ -n "$f2" ] || { echo "::error::镜像内缺 /etc/ponwrt-apk-repo.conf"; exit 1; }
           grep -q 'ufo1cn/ponwrt-apk-repo' "$f2" || { echo "::error::仓库地址内容不对"; exit 1; }
-          f3=$(ls build_dir/target-*/root-*/etc/apk/repositories.d/90-ponwrt-apk-repo.list 2>/dev/null | head -n1 || true)
-          [ -n "$f3" ] || { echo "::error::镜像内缺 90-ponwrt-apk-repo.list"; exit 1; }
-          grep -q '^https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo' "$f3" \
-            || { echo "::error::repositories.d 里的源地址没启用"; exit 1; }
-          echo ">>> repositories.d 地址条目也在"
+          # 源列表：单机型是构建期写死的静态文件；多机型改成首次启动脚本生成，
+          # 这里按 N_DEV 分别核对（两者都必须能证明“源地址会被启用”）。
+          if [ "${N_DEV:-1}" -gt 1 ]; then
+            s3=$(ls build_dir/target-*/root-*/etc/uci-defaults/96-ponwrt-apk-repos 2>/dev/null | head -n1 || true)
+            [ -n "$s3" ] || { echo "::error::镜像内缺 /etc/uci-defaults/96-ponwrt-apk-repos（多机型靠它按机型生成源列表）"; exit 1; }
+            [ -x "$s3" ] || { echo "::error::96-ponwrt-apk-repos 不是可执行"; exit 1; }
+            t3=$(ls build_dir/target-*/root-*/etc/ponwrt-device-caps.txt 2>/dev/null | head -n1 || true)
+            [ -n "$t3" ] || { echo "::error::镜像内缺 /etc/ponwrt-device-caps.txt"; exit 1; }
+            grep -q 'ponwrt-k' build_dir/target-*/root-*/etc/ponwrt-repo-base.txt 2>/dev/null \
+              || { echo "::error::/etc/ponwrt-repo-base.txt 里没有仓库前缀"; exit 1; }
+            echo ">>> 多机型源列表：首次启动脚本 + 机型能力表 + 源前缀都在"
+          else
+            f3=$(ls build_dir/target-*/root-*/etc/apk/repositories.d/90-ponwrt-apk-repo.list 2>/dev/null | head -n1 || true)
+            [ -n "$f3" ] || { echo "::error::镜像内缺 90-ponwrt-apk-repo.list"; exit 1; }
+            grep -q '^https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo' "$f3" \
+              || { echo "::error::repositories.d 里的源地址没启用"; exit 1; }
+            echo ">>> repositories.d 地址条目也在"
+          fi
           echo ">>> 镜像自检通过：固定公钥 + 仓库地址都在"
 
       - name: Organize output files
@@ -1124,7 +1168,7 @@ jobs:
             ## 本次构建（机型类别 ${{ inputs.label }}）
 
             - 机型：${{ inputs.device_list }}
-            - 机型能力：由 `configs/device-features.txt` 决定，按能力套用 `configs/features/<能力>.config` 片段（usb / wifi / no-wifi）
+            - 机型能力：由 `configs/devices/<board>.config` 决定（DEVICE_CAPS + DEVICE_PREINSTALL），一次构建内按机型装包
             - 同一类别内机型能力一致，因此 `=y` 的包不会串到别的类别镜像里
             - 配置来源：`configs/an7581.config` + `configs/release.config`（不含自有包选装）
             - 内核能力来源：`target/linux/airoha/an7581/config-6.18` 的基础设施符号
