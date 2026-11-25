@@ -284,17 +284,40 @@ jobs:
             echo "note=安装 kmod apk 前必须确认固件来自同一 commit 且 config-6.18 未变"
           } | tee output/build-info.txt
 
-      - name: Strip kmod selections (内核模块统一由固件流程编译)
+      - name: Strip kmod / kernel selections (内核模块统一由固件流程编译)
         run: |
           set -euo pipefail
           # 设计口径：kmod 只由 fw-build 编（与固件同树同配置，vermagic 一致）。
-          # 这里把 .config 里的 kmod 选择全部摘掉，包构建就不会再被
-          # package/kernel/gpio-button-hotplug 之类的依赖拉进内核编译。
-          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug)=[my]/d' .config
-          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug) is not set/d' .config
-          left=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
-          echo ">>> 剩余 kmod 选择：${left:-0}"
-          [ "${left:-0}" -eq 0 ] || { echo "::error::.config 里仍有 kmod 选择，会触发内核编译"; exit 1; }
+          # run 45521735037 实证：只删行不管用——make 发现 .config 与 tmp/.config-package.in
+          # 不同步（"your configuration is out of sync"）会自己跑 syncconfig，把默认 y 的
+          # gpio-button-hotplug 与 kernel 元包写回来，随后 nlbwmon 依赖链去编
+          # package/kernel/gpio-button-hotplug，包流没有内核树 → "No rule to make target
+          # .../linux-6.18.60/.config"。正确做法：写成显式 not set（kconfig 会保留用户值），
+          # 并在 oldconfig 前后各摘一次，最后硬校验为零。
+          strip_pkg_sel() {
+            awk '
+              /^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=/ {
+                split($0, a, "="); print "# " a[1] " is not set"; next
+              }
+              { print }
+            ' .config > .config.strip && mv .config.strip .config
+          }
+          strip_pkg_sel
+          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/inc-oldconfig.log 2>&1 || {
+            tail -n 60 /tmp/inc-oldconfig.log
+            echo "::error::包元数据同步失败（oldconfig）"
+            exit 1
+          }
+          strip_pkg_sel
+          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/inc-oldconfig2.log 2>&1 || true
+          strip_pkg_sel
+          touch .config
+          left_kmod=$(grep -cE '^CONFIG_PACKAGE_kmod-' .config || true)
+          left_kernel=$(grep -cE '^CONFIG_PACKAGE_kernel=' .config || true)
+          left_gpio=$(grep -cE '^CONFIG_PACKAGE_gpio-button-hotplug=' .config || true)
+          echo ">>> 剩余选择 kmod=${left_kmod:-0} kernel=${left_kernel:-0} gpio-button-hotplug=${left_gpio:-0}"
+          [ "${left_kmod:-0}" -eq 0 ] && [ "${left_kernel:-0}" -eq 0 ] && [ "${left_gpio:-0}" -eq 0 ] \
+            || { echo "::error::.config 里仍有 kmod/kernel 包选择，会触发内核编译"; exit 1; }
 
       - name: Build host tools and toolchain
         run: |
