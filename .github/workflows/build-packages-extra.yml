@@ -357,6 +357,37 @@ jobs:
             --only "${{ inputs.only }}" \
             --fwconfig configs/an7581.config configs/release.config configs/features/kmod-repo.config || true
 
+      # kmod 的编译依赖一律从目标包 Makefile 里摘掉：包构建只要看到 +kmod-xxx，
+      # make package/.../compile 就会去拉 package/kernel/linux（内核树不在这里，
+      # 必挂 ERROR: package/kernel/linux failed to build）。kmod 本体统一由固件流程
+      # fw-build.yml 编译发布，这里只编用户态，产出的 apk 不再声明 kmod 依赖。
+      - name: Strip kmod DEPENDS from target packages (kmod 只由固件编)
+        run: |
+          set -uo pipefail
+          : > /tmp/stripped-kmods.txt
+          dumped=0; touched=0
+          for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
+            [ -f "$manifest" ] || continue
+            while IFS='|' read -r path apk required; do
+              [ -n "${path:-}" ] || continue
+              case "$path" in \#*) continue ;; esac
+              [ -f "$path/Makefile" ] || { echo "::warning::缺 Makefile：$path"; continue; }
+              hits=$(grep -oE '\+kmod-[A-Za-z0-9_.+-]+' "$path/Makefile" | sed 's/^+/ /' | sort -u || true)
+              [ -n "$hits" ] || continue
+              sed -i -E 's/\+kmod-[A-Za-z0-9_.+-]+//g; s/\+kernel//g' "$path/Makefile"
+              sed -i -E '/^[[:space:]]*DEPENDS/ s/[[:space:]]+/ /g; /^[[:space:]]*DEPENDS/ s/[[:space:]]+$//' "$path/Makefile"
+              touched=$((touched+1)); dumped=$((dumped+$(printf '%s\n' "$hits" | wc -l)))
+              printf '%s\n' "$hits" >> /tmp/stripped-kmods.txt
+              echo ">>> 摘掉 kmod 依赖：$apk ->$(printf ' %s' $hits)"
+            done < "$manifest"
+          done
+          sort -u /tmp/stripped-kmods.txt -o /tmp/stripped-kmods.txt
+          echo ">>> 共 $touched 个包、$(wc -l < /tmp/stripped-kmods.txt) 个不同 kmod 依赖被摘除（这些 kmod 由固件流程编）"
+          echo "STRIPPED_KMODS<<EOF" >> "$GITHUB_ENV"
+          cat /tmp/stripped-kmods.txt >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+          { echo "### 已摘除的 kmod 依赖（由固件流程编译）"; echo '```'; cat /tmp/stripped-kmods.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       # kmod 不在这里编：统一由固件构建流程（fw-build.yml）编译并作为 apk 发布，
       # 保证 build/src/ABI 与固件同一次构建一致（清单见 configs/features/kmod-repo.config）
       - name: Build packages (B/C 两组清单, no silent drop)
