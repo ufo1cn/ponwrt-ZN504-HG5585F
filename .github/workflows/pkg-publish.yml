@@ -31,17 +31,20 @@ on:
           - kmods
         default: all
       fw_labels:
-        description: 'kmods 分组取哪条固件入口（现在只有统一入口 fw-all.yml，填 all 即可）'
+        description: 'kmods 分组取哪条固件入口 label（留空=按 idx_branch 推断：repo→all、repo-wed→wed）'
         type: string
-        default: 'all'
+        default: ''
       source_runs:
         description: '指定源 run（格式 incremental=30,legacy=11,extra=12,kmods=15；留空=各取最近一次成功）'
         type: string
         default: ''
       idx_branch:
-        description: '写哪个索引分支（repo=主线；实验分支用 repo-wed 等）'
-        type: string
-        default: 'repo'
+        description: '写哪个索引分支（repo=主线五台；repo-wed=WED 分支两台）'
+        type: choice
+        options:
+          - repo
+          - repo-wed
+        default: repo
       kver:
         description: '内核版本（决定目录 ponwrt-k<kver>；留空=按源码树推断）'
         type: string
@@ -59,8 +62,9 @@ permissions:
   contents: read
   actions: read
 
+# 与 fw-publish、apk-repo 的 reindex 共用同一把写锁（按索引分支区分）。
 concurrency:
-  group: pkg-publish-${{ inputs.device }}-${{ inputs.groups }}
+  group: apk-repo-write-${{ inputs.idx_branch }}
   cancel-in-progress: false
 
 env:
@@ -76,6 +80,9 @@ jobs:
     steps:
       - name: Checkout source (configs / 内核版本推断)
         uses: actions/checkout@v4
+        with:
+          # 能力归类表与内核版本要按索引分支的源码树取：repo-wed 用 WED 分支
+          ref: ${{ inputs.idx_branch == 'repo-wed' && 'feat/wed-npu-offload-6.18' || github.ref }}
 
       - name: Resolve publish plan
         env:
@@ -92,8 +99,14 @@ jobs:
           REPO = os.environ['SRC_REPO']
           dev_in = os.environ['DEV']
           groups_in = os.environ['GROUPS']
-          labels_in = (os.environ.get('FW_LABELS') or 'all').strip()
+          labels_in = (os.environ.get('FW_LABELS') or '').strip()
           runs_in = os.environ.get('RUNS', '').strip()
+          idx = (os.environ.get('IDX_BRANCH') or 'repo').strip()
+          # kmod 的 vermagic 只与内核 config 绑定：主线固件只能进 repo、WED 固件只能进 repo-wed
+          EXPECT_LABEL = {'repo': 'all', 'repo-wed': 'wed'}.get(idx)
+          if EXPECT_LABEL is None:
+              print(f'::error::未知索引分支 {idx}（只支持 repo / repo-wed）', file=sys.stderr)
+              sys.exit(1)
 
           DEVICES = ['hg5585f-ct', 'hg5382a'] if dev_in == 'both' else [dev_in]
           MAP = {
@@ -147,9 +160,13 @@ jobs:
           for g in groups:
               if g == 'kmods':
                   if labels_in in ('', 'all'):
-                      labels = list(FW_LABEL_MAP)
+                      labels = [EXPECT_LABEL]
                   else:
                       labels = [x.strip() for x in labels_in.split(',') if x.strip()]
+                      if labels != [EXPECT_LABEL]:
+                          print(f'::error::索引分支 {idx} 的 kmods 只能来自 label={EXPECT_LABEL}，'
+                                f'当前写了 {",".join(labels)}', file=sys.stderr)
+                          sys.exit(1)
                   for label in labels:
                       if label not in FW_LABEL_MAP:
                           print(f'::error::未知固件入口 label：{label}', file=sys.stderr)
@@ -158,13 +175,12 @@ jobs:
                       want = f'PonWrt-firmware-{label}-r'
                       run_id, hit = pick_run(wf, want, pinned.get('kmods') or pinned.get(label))
                       if not hit:
-                          # 实验分支（如 wed）的固件可能还没跑出成功产物：all 模式下跳过，
-                          # 显式点名时才报错
-                          if labels_in in ('', 'all'):
-                              print(f'::warning::kmods/{label}：暂无带 {want}* 产物的成功固件 run，跳过', file=sys.stderr)
-                              continue
-                          print(f'::error::kmods/{label}：找不到带 {want}* 产物的成功固件 run', file=sys.stderr)
-                          sys.exit(1)
+                          # groups=all 时固件还没跑出 kmods 就跳过整组；显式只发 kmods 则必须找到
+                          if groups_in == 'kmods':
+                              print(f'::error::kmods/{label}：找不到带 {want}* 产物的成功固件 run', file=sys.stderr)
+                              sys.exit(1)
+                          print(f'::warning::kmods/{label}：暂无带 {want}* 产物的成功固件 run，跳过', file=sys.stderr)
+                          continue
                       plan.append({'group': 'kmods', 'device': label, 'fw_device': dev,
                                    'run_id': run_id, 'artifact': hit[0], 'workflow': wf})
                       print(f'>>> kmods/{label}（{dev}）: run={run_id} artifact={hit[0]}', file=sys.stderr)
