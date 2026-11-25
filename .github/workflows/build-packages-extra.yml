@@ -182,12 +182,14 @@ jobs:
         run: |
           set -euo pipefail
           # 先删同名行，避免和我方新加的重复
-          sed -i '/src-git nikki /d;/src-git homeproxy /d;/src-git passwall2 /d' feeds.conf.default
+          sed -i '/src-git nikki /d;/src-git homeproxy /d;/src-git passwall2 /d;/src-git oaf /d' feeds.conf.default
           cat >> feeds.conf.default <<'EOF'
           src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main
           # iptv feed 不再注入：kmod-iptv 与其上层已移交固件流程 fw-build.yml
           src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master
           src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main
+          # oaf feed：只取用户态 appfilter 与 luci-app-oaf；kmod-oaf 由固件流程编，包流 strip 掉该依赖
+          src-git oaf https://github.com/destan19/OpenAppFilter.git
           EOF
           dos2unix feeds.conf.default 2>/dev/null || true
           cat feeds.conf.default
