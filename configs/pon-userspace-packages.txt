@@ -43,10 +43,10 @@ package/feeds/luci/luci-app-msd_lite|luci-i18n-msd_lite-zh-cn|required
 
 # ---- 抓包 / 流量分析（feed 内包）----
 # 先编库，再编依赖它们的工具，顺序不能乱
-package/feeds/packages/ncurses|libncurses|required
-package/feeds/packages/ncurses|libncursesw|required
-package/feeds/packages/ncurses|terminfo|required
-package/feeds/packages/libpcap|libpcap1|required
+package/libs/ncurses|libncurses|required
+package/libs/ncurses|libncursesw|required
+package/libs/ncurses|terminfo|required
+package/libs/libpcap|libpcap1|required
 package/feeds/telephony/sngrep|sngrep|required
 package/feeds/packages/iftop|iftop|required
 package/feeds/packages/iptraf-ng|iptraf-ng|required
@@ -59,8 +59,8 @@ package/feeds/luci/luci-app-nlbwmon|luci-i18n-nlbwmon-zh-cn|required
 package/feeds/packages/tailscale|tailscale|required
 
 # ---- SMB 客户端 + USB 录音（用户态；对应内核 kmod 已在 usb 能力片段 =m，由固件流编）----
-# cifs-utils 提供 mount.cifs；alsa-lib 是 alsa-utils 的依赖，alsa-utils 提供 arecord/amixer。
+# mount.cifs 由 cifsmount 提供（上游 immortalwrt/packages 的 cifs-utils 源码目录里没有 cifs-utils 包名）；alsa-lib 是 alsa-utils 的依赖，alsa-utils 提供 arecord/amixer。
 # 先编库再编工具，顺序不能乱。
-package/feeds/packages/cifs-utils|cifs-utils|required
+package/feeds/packages/cifs-utils|cifsmount|required
 package/feeds/packages/alsa-lib|alsa-lib|required
 package/feeds/packages/alsa-utils|alsa-utils|required

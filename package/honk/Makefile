@@ -27,8 +27,12 @@ define Package/honk
   TITLE:=eBPF transparent proxy engine (honk-core framework and dependencies)
   URL:=https://github.com/daeuniverse/honk
   LICENSE:=GPL-3.0-only
+  # honk 本体走 tc-bpf，不依赖 nfqueue；nft-queue/nfnetlink-queue 改成「有就带」的条件依赖，
+  # 否则内核里 NETFILTER_NETLINK_QUEUE 未开时整个 honk 会被 kconfig 隐藏，
+  # 镜像阶段 apk add 报「honk (no such package)」（run 45604633144）。
   DEPENDS:=@(aarch64||x86_64) +kmod-veth +kmod-sched-core +kmod-sched-bpf \
-           +kmod-nft-core +kmod-nft-queue +kmod-nfnetlink-queue \
+           +kmod-nft-core \
+           +PACKAGE_kmod-nft-queue:kmod-nft-queue +PACKAGE_kmod-nfnetlink-queue:kmod-nfnetlink-queue \
            +kmod-nf-conntrack +bpftool +ip-full \
            +PACKAGE_v2ray-geoip:v2ray-geoip +PACKAGE_v2ray-geosite:v2ray-geosite \
            +curl +tar +ca-bundle
