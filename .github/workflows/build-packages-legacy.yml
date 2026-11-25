@@ -267,7 +267,7 @@ jobs:
           make -j"$(nproc)" tools/compile
           make -j"$(nproc)" toolchain/compile
 
-      - name: Build kernel tree (用户态包所需的内核头与 staging)
+      - name: Build kernel tree (内核头 + staging，kmod 依赖必须存在)
         # 必需：任何 kmod 依赖（gpio-button-hotplug、kmod-wireguard 等）都要内核 .config 与内核树。
         # 旧版这里写成 `if: inputs.with_kernel`，with_kernel=false 时整步被跳过 → kmod 0.2s 失败被 `|| true` 吞掉，
         # 随后逐个上层包连环"编译失败"（run #9 的 12 个 FAIL 就是这么来的）。

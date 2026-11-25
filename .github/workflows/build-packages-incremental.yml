@@ -257,8 +257,7 @@ jobs:
           make -j"$(nproc)" tools/compile
           make -j"$(nproc)" toolchain/compile
 
-      - name: Build kernel tree (用户态包所需的内核头与 staging)
-        if: inputs.with_kernel
+      - name: Build kernel tree (内核头 + staging，kmod 依赖必须存在)
         run: |
           set -euo pipefail
           # 编内核本身与内核模块树；kmod 包的 vermagic 取自这里
