@@ -86,7 +86,6 @@
 
 - `tailscale` 加入 `configs/pon-userspace-packages.txt`，作为独立 apk 由包工作流产出、经 `pkg-publish` 入仓库；不预装进任何机型镜像。依赖的 `kmod-tun` 已在 `configs/an7581.config` 里常年 `=y`。
 - `honk`、`luci-app-honk` 同时在镜像（四台）与仓库里可装。
-
 - 三条包工作流的 kmod 口径：`Configure` 之后先删掉 `.config` 里全部 `CONFIG_PACKAGE_kmod-*` 与 `gpio-button-hotplug` 选择并断言剩余为 0，然后由预检扫描 `configs/pon-*.txt` 清单内每个 Makefile，凡出现 `$(LINUX_DIR)`、`${LINUX_DIR}`、`$(LINUX_KARCH)`、`vmlinux`、`KERNEL_MAKE` 直接失败。这类包（eBPF CO-RE、`perf`、`bpftool` 生成 `vmlinux.h` 等）的产物把内核结构体偏移和私有头锈进二进制，换内核 config 即失效，只能随固件一起编。
 
 ## 十、明确不做
