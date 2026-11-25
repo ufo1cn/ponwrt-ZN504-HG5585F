@@ -78,6 +78,77 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Load per-device definitions (configs/devices/*.config)
+        run: |
+          set -euo pipefail
+          # 机型定义唯一事实来源：configs/devices/<board>.config
+          #   DEVICE_CAPS        能力（usb / wifi / bt；只决定“装什么进镜像”）
+          #   DEVICE_PREINSTALL  预装进该机型 rootfs 的包清单（旧 bake_usb 的效果）
+          # 工作流把这份清单写进对应机型的 Device 定义（DEVICE_PACKAGES），
+          # 不用全局 .config 的 =y —— 全局 =y 会把包塞进每一台镜像。
+          DEVICES="${{ inputs.device_list }}"
+          [ -n "${DEVICES// /}" ] || { echo "::error::device_list 为空"; exit 1; }
+          : > /tmp/dev-pre.tsv
+          caps_all=""
+          for dev in $DEVICES; do
+            f="configs/devices/${dev}.config"
+            [ -f "$f" ] || { echo "::error::缺机型定义文件 $f"; exit 1; }
+            caps=$(sed -n 's/^DEVICE_CAPS=//p' "$f" | head -n1)
+            pre=$(sed -n 's/^DEVICE_PREINSTALL=//p' "$f" | head -n1)
+            printf '%s\t%s\n' "$dev" "${pre:-}" >> /tmp/dev-pre.tsv
+            echo ">>> $dev 能力：${caps:-（无）}；预装包 $(echo ${pre:-} | wc -w) 个"
+            for c in $caps; do
+              case " $caps_all " in *" $c "*) ;; *) caps_all="$caps_all $c" ;; esac
+            done
+          done
+          echo "CAPS=$caps_all" >> "$GITHUB_ENV"
+          echo "N_DEV=$(echo $DEVICES | wc -w)" >> "$GITHUB_ENV"
+          # 注入进 target/linux/airoha/image/an7581.mk 的 Device 定义，
+          # 行的末尾带标记，重复运行不会叠加。
+          python3 - /tmp/dev-pre.tsv target/linux/airoha/image/an7581.mk <<'PY'
+          import sys
+          tsv, mk = sys.argv[1], sys.argv[2]
+          rows = [l.rstrip('\n').split('\t') for l in open(tsv, encoding='utf-8') if l.strip()]
+          lines = open(mk, encoding='utf-8').read().splitlines()
+          for board, pkgs in rows:
+              if not pkgs.strip():
+                  print('>>> %s 无预装包，跳过注入' % board)
+                  continue
+              start = None
+              for i, l in enumerate(lines):
+                  if l.strip() == 'define Device/' + board:
+                      start = i
+                      break
+              if start is None:
+                  sys.exit('::error::an7581.mk 里找不到 define Device/%s' % board)
+              end = None
+              for j in range(start + 1, len(lines)):
+                  if lines[j].strip() == 'endef':
+                      end = j
+                      break
+              if end is None:
+                  sys.exit('::error::Device/%s 的 define 块没有 endef' % board)
+              lines = [l for l in lines if 'ponwrt-preinstall:' + board not in l]
+              start = None
+              for i, l in enumerate(lines):
+                  if l.strip() == 'define Device/' + board:
+                      start = i
+                      break
+              for j in range(start + 1, len(lines)):
+                  if lines[j].strip() == 'endef':
+                      end = j
+                      break
+              lines.insert(end, '  DEVICE_PACKAGES += %s # ponwrt-preinstall:%s' % (' '.join(pkgs.split()), board))
+              print('>>> 注入 Device/%s：%d 个预装包' % (board, len(pkgs.split())))
+          open(mk, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines) + '\n')
+          PY
+          for dev in $DEVICES; do
+            grep -q "ponwrt-preinstall:${dev}" target/linux/airoha/image/an7581.mk \
+              || { echo "::error::Device/${dev} 的预装包没有落进 an7581.mk"; exit 1; }
+          done
+          echo ">>> 机型定义加载完成"
+
+
       - name: Install fixed apk signing key
         env:
           APK_SIGNING_PRIVATE_KEY: ${{ secrets.APK_SIGNING_PRIVATE_KEY }}
@@ -138,10 +209,10 @@ jobs:
             build_dir/target-*/linux-*
             staging_dir/host
             staging_dir/toolchain-*
-          key: ponwrt-fwtree-${{ inputs.label }}-${{ hashFiles('configs/**/*.config', 'configs/device-features.txt', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default') }}-${{ github.sha }}
+          key: ponwrt-fwtree-${{ hashFiles('configs/an7581.config', 'configs/release.config', 'configs/features/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default', 'target/linux/airoha/image/an7581.mk') }}-${{ github.sha }}
           restore-keys: |
-            ponwrt-fwtree-${{ inputs.label }}-${{ hashFiles('configs/**/*.config', 'configs/device-features.txt', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default') }}-
-            ponwrt-fwtree-${{ inputs.label }}-
+            ponwrt-fwtree-${{ hashFiles('configs/an7581.config', 'configs/release.config', 'configs/features/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default', 'target/linux/airoha/image/an7581.mk') }}-
+            ponwrt-fwtree-
             ponwrt-fwtree-
 
       # dl（源码包）缓存：actions/cache@v4 的 post 保存只在 job 成功时执行，
@@ -178,10 +249,10 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ponwrt-ccache-zn504-${{ inputs.label }}-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+          key: ponwrt-ccache-zn504-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
           restore-keys: |
-            ponwrt-ccache-zn504-${{ inputs.label }}-${{ hashFiles('configs/*.config') }}-
-            ponwrt-ccache-zn504-${{ inputs.label }}-
+            ponwrt-ccache-zn504-${{ hashFiles('configs/*.config') }}-
+            ponwrt-ccache-zn504-
             ponwrt-ccache-zn504-
 
       - name: Configure for the requested device(s)
@@ -210,25 +281,11 @@ jobs:
           #   但没有包拥有它 → 打包阶段报 missing dependencies（kmod-bluetooth
           #   缺 rfkill.ko 就是这么来的）。
           # ------------------------------------------------------------------
-          features_of() {
-            local dev line block out
-            dev="$1"; out=""
-            line=$(grep -E "^[[:space:]]*${dev}[[:space:]]*\|" configs/device-features.txt 2>/dev/null | head -n1 || true)
-            if [ -n "$line" ]; then printf '%s' "${line#*|}"; return 0; fi
-            block=$(awk -v d="$dev" 'index($0,"define Device/" d)==1 {f=1;next} f&&/^endef/{exit} f' target/linux/airoha/image/*.mk 2>/dev/null || true)
-            if echo "$block" | grep -qiE 'kmod-usb'; then out="$out usb"; fi
-            printf '%s' "$out"
-          }
           DEVICES="${{ inputs.device_list }}"
           [ -n "${DEVICES// /}" ] || { echo "::error::device_list 为空"; exit 1; }
-          CAPS=""
-          for dev in $DEVICES; do
-            for c in $(features_of "$dev"); do
-              case " $CAPS " in *" $c "*) ;; *) CAPS="$CAPS $c" ;; esac
-            done
-          done
+          # 能力来自 configs/devices/<board>.config（上一步已解析，多机型取并集）
+          CAPS="${CAPS:-}"
           echo ">>> 机型 $DEVICES 能力：${CAPS:-（无：只编公共部件）}"
-          echo "CAPS=$CAPS" >> "$GITHUB_ENV"
           has_cap() { case " $CAPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac ; }
 
           APPLY_CAPS="$CAPS"
@@ -256,6 +313,14 @@ jobs:
                   sym=${line%%=*}; val=${line#*=} ;;
                 *) continue ;;
               esac
+              # kmod 的“装不装进镜像”改由 configs/devices/<board>.config 的
+              # DEVICE_PREINSTALL 决定（写进 Device 定义），这里只落地非 kmod 的 =y
+              # （block-mount、busybox 选项等）；所有 kmod 一律走后面的统一 =m。
+              if [ "$val" = "y" ]; then
+                case "$sym" in
+                  CONFIG_PACKAGE_kmod-*) continue ;;
+                esac
+              fi
               sed -i "/^${sym}=/d; /^# ${sym} is not set/d" .config
               if [ "$val" = "notset" ]; then
                 printf '# %s is not set\n' "$sym" >> .config
@@ -402,13 +467,16 @@ jobs:
           echo ">>> btrfs 归位：kmod-fs-btrfs 及依赖一律 =m（只出 apk，不进镜像）"
 
           # ------------------------------------------------------------------
-          # bake_usb=true：USB 驱动按 =y 烘焙进镜像（旧 USB 固件的做法，插上即用）。
-          # 只对 .config 里真实存在（kconfig 可见）的符号做改写；隐藏包/条件包
-          # （HIDDEN、@USE_XXX）无法用 CONFIG_PACKAGE_ 选择，逐个列出到日志，
-          # 它们是否进镜像由 kconfig 的依赖解析结果决定，不当成失败。
+          # 预装清单已改为 per-device：configs/devices/<board>.config 的
+          # DEVICE_PREINSTALL 会被写进该机型的 Device 定义（DEVICE_PACKAGES += …），
+          # 由镜像装配阶段按机型安装，不再靠全局 .config 的 =y。
+          # bake_usb 输入因此废弃（保留输入只为老 dispatch 不报错）。
           # ------------------------------------------------------------------
+          if [ "${{ inputs.bake_usb }}" = "true" ]; then
+            echo "::warning::bake_usb 已废弃并被忽略：预装清单现在由 configs/devices/${DEVICES%% *}.config 的 DEVICE_PREINSTALL 决定"
+          fi
           bake_invisible=""
-          if [ "${{ inputs.bake_usb }}" = "true" ] && has_cap usb; then
+          if false; then
             echo ">>> bake_usb=true：USB 驱动按 =y 烘焙进镜像"
             for s in $(grep -E '^CONFIG_PACKAGE_' configs/features/usb.config | cut -d= -f1); do
               if grep -qE "^(# )?${s}(=| is not set)" .config; then
@@ -472,12 +540,12 @@ jobs:
               grep -q "^${s}=y" .config \
                 || { echo "::error::usb 能力已启用，但 ${s} 不是 =y（插 U 盘不会被识别/自动挂载）"; exit 1; }
             done
-            if [ "${{ inputs.bake_usb }}" = "true" ]; then
-              for s in kmod-fs-vfat kmod-fs-ext4 kmod-fs-exfat kmod-fs-ntfs3 kmod-fs-f2fs kmod-usb-storage; do
-                grep -q "^CONFIG_PACKAGE_${s}=y" .config \
-                  || { echo "::error::usb 能力已启用，但 ${s} 不是 =y（识别到卷却挂不上）"; exit 1; }
-              done
-            fi
+            # 文件系统/存储驱动现在只要求“被编出来”（=y/=m 皆可），
+            # 装不装进该机型镜像由 configs/devices/<board>.config 的 DEVICE_PREINSTALL 决定
+            for s in kmod-fs-vfat kmod-fs-ext4 kmod-fs-exfat kmod-fs-ntfs3 kmod-fs-f2fs kmod-usb-storage; do
+              grep -q "^CONFIG_PACKAGE_${s}=[ym]" .config \
+                || { echo "::error::usb 能力已启用，但 ${s} 没被选中（识别到卷也挂不上）"; exit 1; }
+            done
             grep -q '^CONFIG_PACKAGE_block-mount=y' .config \
               || { echo "::error::usb 能力已启用，但 block-mount 不是 =y（没有热插拔挂载脚本）"; exit 1; }
             # btrfs 只出 apk，禁止被烘进镜像（体积考虑）
@@ -490,19 +558,18 @@ jobs:
             echo ">>> usb 能力：blkid 识别 + 文件系统驱动 + block-mount 已进镜像"
           fi
           if has_cap wifi; then
-            grep -q "^CONFIG_PACKAGE_kmod-mt7915e=y" .config \
-              || { echo "::error::wifi 能力已启用，但 kmod-mt7915e 不是 =y"; exit 1; }
-            echo ">>> wifi 能力：内置无线已进镜像"
+            grep -q "^CONFIG_PACKAGE_kmod-mt7915e=[ym]" .config \
+              || { echo "::error::wifi 能力已启用，但 kmod-mt7915e 没被选中"; exit 1; }
+            grep -q "kmod-mt7915e" "configs/devices/${DEVICES%% *}.config" \
+              || { echo "::error::wifi 能力已启用，但机型定义的 DEVICE_PREINSTALL 里没有 kmod-mt7915e（驱动不会进镜像）"; exit 1; }
+            echo ">>> wifi 能力：内置无线已编出，并按机型定义预装进镜像"
           else
             for s in kmod-mt7915e kmod-mt7916-firmware; do
               line=$(grep -E "CONFIG_PACKAGE_${s}(=| is not set)" .config | head -n1 || true)
               echo ">>> ${s}: ${line:-（.config 里没有该符号）}"
-              if echo "$line" | grep -qE "^CONFIG_PACKAGE_${s}=y$"; then
-                echo "::error::未启用 wifi 能力，但 ${s}=y（会被烘进镜像）；检查 no-wifi 片段是否被 kconfig 反选"
-                exit 1
-              fi
               case "$line" in
-                *=m) echo "::warning::${s}=m：只编成 apk、不进镜像（无 wifi 机型可以接受，但会白编一个无线驱动）" ;;
+                *=y) echo "::error::未启用 wifi 能力，但 ${s}=y（会被烘进每台镜像）"; exit 1 ;;
+                *=m) echo ">>> ${s}=m：只编成 apk、不进镜像（无 wifi 机型正常）" ;;
               esac
             done
             echo ">>> 无 wifi 能力：内置无线没有进镜像"
@@ -725,33 +792,29 @@ jobs:
           fi
 
           usb_found=$(find "$root" -name 'usb-common.ko*' 2>/dev/null | head -n5 || true)
-          if [ "${{ inputs.bake_usb }}" = "true" ] && has_cap usb; then
+          if has_cap usb; then
             for m in exfat.ko snd-usb-audio.ko; do
               if find "$root" -name "$m*" 2>/dev/null | grep -q .; then
-                echo ">>> bake_usb 核对: $m 已在镜像里"
+                echo ">>> 预装核对: $m 已在镜像里"
               else
-                echo "::error::bake_usb=true，但 rootfs 里没有 $m（说明片段没按 =y 烘焙）"
+                echo "::error::机型能力含 usb，但 rootfs 里没有 $m（configs/devices/*.config 的 DEVICE_PREINSTALL 没落地）"
                 fail=1
               fi
             done
-            # USB 无线网卡（rtw88 USB 栈）必须真的落地，否则清单里的 kmod-rtw88-* 就是被 kconfig 静默丢掉的
+            # USB 无线网卡（rtw88 USB 栈）必须真的落地，否则 DEVICE_PREINSTALL 里的 kmod-rtw88-* 就是被 kconfig 静默丢掉的
             for m in rtw88_usb.ko rtw88_8822cu.ko rtw88_8821cu.ko; do
               if find "$root" -name "$m*" 2>/dev/null | grep -q .; then
-                echo ">>> bake_usb 核对: $m 已在镜像里"
+                echo ">>> 预装核对: $m 已在镜像里"
               else
-                echo "::error::bake_usb=true，但 rootfs 里没有 $m（rtw88 USB 无线网卡符号被静默丢弃）"
+                echo "::error::机型能力含 usb，但 rootfs 里没有 $m（rtw88 USB 无线网卡符号被静默丢弃）"
                 fail=1
               fi
             done
             echo ">>> rtw88 模块实到：$(find "$root" -name 'rtw88*.ko*' -printf '%f ' 2>/dev/null || true)"
           fi
-          if has_cap usb && [ "${{ inputs.bake_usb }}" != "true" ]; then
-            # 不烘焙：usb 片段所有符号都是 =m，驱动作为 apk 进仓库，设备上按需装。
-            # 镜像里有没有 USB 栈取决于机型 profile 的 DEVICE_PACKAGES，这里不强制要求。
-            echo ">>> usb 能力按 apk 提供（bake_usb=false），镜像内不强制要求 USB 栈；实到：$(echo "${usb_found:-（无）}" | tr '\n' ' ')"
-          elif has_cap usb; then
+          if has_cap usb; then
             if [ -z "$usb_found" ]; then
-              echo "::error::机型能力含 usb 且 bake_usb=true，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
+              echo "::error::机型能力含 usb，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
               fail=1
             else
               echo ">>> usb 能力核对通过：$(echo "$usb_found" | head -n1)"
@@ -821,7 +884,7 @@ jobs:
             build_dir/target-*/linux-*
             staging_dir/host
             staging_dir/toolchain-*
-          key: ponwrt-fwtree-${{ inputs.label }}-${{ hashFiles('configs/**/*.config', 'configs/device-features.txt', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default') }}-${{ github.sha }}
+          key: ponwrt-fwtree-${{ hashFiles('configs/an7581.config', 'configs/release.config', 'configs/features/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default', 'target/linux/airoha/image/an7581.mk') }}-${{ github.sha }}
 
       - name: Save downloads cache
         if: always() && inputs.cache_mode != '不使用缓存'
@@ -837,7 +900,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ponwrt-ccache-zn504-${{ inputs.label }}-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+          key: ponwrt-ccache-zn504-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
 
       - name: Show compiler cache statistics
         if: always() && inputs.cache_mode != '不使用缓存'
