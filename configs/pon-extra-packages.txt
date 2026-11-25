@@ -27,3 +27,7 @@ package/feeds/packages/xray-core|xray-core|required
 
 # ---- homeproxy（immortalwrt/homeproxy，依赖 sing-box，树内已选）----
 package/feeds/homeproxy/luci-app-homeproxy|luci-app-homeproxy|required
+
+# ---- Windows 文件共享：ksmbd（备用，与 samba4 不冲突；默认不装，迁移时再切）----
+package/feeds/packages/ksmbd-tools|ksmbd-tools|required
+package/feeds/luci/luci-app-ksmbd|luci-app-ksmbd|required
