@@ -576,11 +576,11 @@ jobs:
             done
             # block-mount：单机型写全局 =y；多机型要求出现在每个 usb 机型的预装清单里
             if [ "${N_DEV:-1}" -gt 1 ]; then
-              for dev in $(awk '$2 ~ /usb/ {print $1}' /tmp/dev-caps.tsv); do
+              for dev in $(awk -F'\t' '$2 ~ /usb/ {print $1}' /tmp/dev-caps.tsv); do
                 grep -q 'block-mount' "configs/devices/${dev}.config" \
                   || { echo "::error::${dev} 有 usb 能力，但 DEVICE_PREINSTALL 里没有 block-mount（没有热插拔挂载脚本）"; exit 1; }
               done
-              echo ">>> 多机型：block-mount 已按机型预装（$(awk '$2 ~ /usb/ {print $1}' /tmp/dev-caps.tsv | tr '\n' ' ')）"
+              echo ">>> 多机型：block-mount 已按机型预装（$(awk -F'\t' '$2 ~ /usb/ {print $1}' /tmp/dev-caps.tsv | tr '\n' ' ')）"
             else
               grep -q '^CONFIG_PACKAGE_block-mount=y' .config \
                 || { echo "::error::usb 能力已启用，但 block-mount 不是 =y（没有热插拔挂载脚本）"; exit 1; }
@@ -598,7 +598,7 @@ jobs:
             grep -q "^CONFIG_PACKAGE_kmod-mt7915e=[ym]" .config \
               || { echo "::error::wifi 能力已启用，但 kmod-mt7915e 没被选中"; exit 1; }
             # 有 wifi 能力的机型，其 DEVICE_PREINSTALL 必须包含内置无线驱动
-            wifi_devs=$(awk '$2 ~ /wifi/ {print $1}' /tmp/dev-caps.tsv)
+            wifi_devs=$(awk -F'\t' '$2 ~ /wifi/ {print $1}' /tmp/dev-caps.tsv)
             [ -n "$wifi_devs" ] || { echo "::error::能力表说 wifi，但没有任何机型被标成 wifi"; exit 1; }
             for dev in $wifi_devs; do
               grep -q "kmod-mt7915e" "configs/devices/${dev}.config" \
