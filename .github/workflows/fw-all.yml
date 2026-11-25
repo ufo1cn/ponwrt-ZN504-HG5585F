@@ -37,6 +37,9 @@ concurrency:
   group: fw-all-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
   firmware:
     strategy:
@@ -56,3 +59,4 @@ jobs:
       device_list: ${{ matrix.board }}
       upload_release: ${{ inputs.upload_release }}
       cache_mode: ${{ inputs.cache_mode }}
+    secrets: inherit
