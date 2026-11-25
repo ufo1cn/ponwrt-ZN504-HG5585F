@@ -1,0 +1,43 @@
+#!/bin/sh
+# ==============================================================================
+# Honk 官方静态核心下载助手 (纯开源通用脚本，零私有信息)
+# ==============================================================================
+
+arch=$(uname -m)
+case "$arch" in
+    aarch64|arm64) pkg_arch="aarch64" ;;
+    x86_64|amd64) pkg_arch="x86_64" ;;
+    *) echo "Unsupported architecture: $arch"; exit 1 ;;
+esac
+
+TAG="v0.1.0-beta.6"
+TAR_NAME="honk-core-${TAG}-${pkg_arch}-unknown-linux-musl-full.tar.gz"
+TMP_DIR="/tmp/honk_install"
+mkdir -p "$TMP_DIR" /etc/honk
+
+echo "正在下载官方最新 Honk 核心 (${TAG})..."
+success=0
+for mirror in "https://ghfast.top/" "https://gh-proxy.com/" ""; do
+    url="${mirror}https://github.com/daeuniverse/honk/releases/download/${TAG}/${TAR_NAME}"
+    echo "尝试下载源: ${mirror:-GitHub官方直连} ..."
+    if curl -fsSL --connect-timeout 10 -m 90 "$url" -o "$TMP_DIR/honk.tar.gz"; then
+        success=1
+        break
+    fi
+done
+
+if [ "$success" = "1" ] && tar -xzf "$TMP_DIR/honk.tar.gz" -C "$TMP_DIR/"; then
+    find "$TMP_DIR" -name honk-core -type f -exec cp -f {} /usr/bin/honk-core \;
+    chmod +x /usr/bin/honk-core
+    ln -sf /usr/bin/honk-core /usr/bin/honk
+    rm -rf "$TMP_DIR"
+    echo "Honk 核心安装完成！"
+    /usr/bin/honk-core -v 2>/dev/null || /usr/bin/honk-core -h 2>/dev/null | head -n 3
+    if [ -x /etc/init.d/honk ]; then
+        /etc/init.d/honk restart 2>/dev/null || true
+    fi
+else
+    echo "错误：下载失败，请检查网络连接。"
+    rm -rf "$TMP_DIR"
+    exit 1
+fi

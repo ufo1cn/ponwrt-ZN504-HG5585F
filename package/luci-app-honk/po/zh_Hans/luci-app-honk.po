@@ -1,0 +1,14 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "Honk 透明代理"
+msgstr "Honk 透明代理"
+
+msgid "honk"
+msgstr "Honk 透明代理"
+
+msgid "LuCI support for honk"
+msgstr "Honk 透明代理 LuCI 支持"
+
+msgid "Grant access to the honk configuration and log"
+msgstr "授予访问 honk 配置和日志的权限"
