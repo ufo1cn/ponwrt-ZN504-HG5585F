@@ -45,4 +45,9 @@ done
 
 tailscale set --accept-routes=false 2>/dev/null || true
 
+# zram swap 只当 OOM 兜底：少量换出、别把 page cache 全赶进压缩区
+if grep -q zram /proc/swaps 2>/dev/null; then
+  echo 20 > /proc/sys/vm/swappiness 2>/dev/null
+fi
+
 exit 0
