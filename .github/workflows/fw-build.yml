@@ -660,10 +660,17 @@ jobs:
           #!/bin/sh
           # 首次启动：按本机 board_name 查机型能力，生成 apk 源列表
           # 机型能力表在 /etc/ponwrt-device-caps.txt，源前缀在 /etc/ponwrt-repo-base.txt
-          board=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+          # board_name 是 OpenWrt 的 "厂商,机型" 形式（fiberhome,hg5585f-ct），
+          # 能力表用的是 Device 名（fiberhome_hg5585f-ct），这里统一成下划线。
+          board=$(cat /tmp/sysinfo/board_name 2>/dev/null | tr ',' '_')
           base=$(cat /etc/ponwrt-repo-base.txt 2>/dev/null)
           [ -n "$base" ] || exit 0
+          [ -n "$board" ] || board=unknown
           caps=$(awk -v b="$board" '$1==b { $1=""; sub(/^[ \t]+/,""); print; exit }' /etc/ponwrt-device-caps.txt 2>/dev/null)
+          # SFP 变体的 board_name 多一个 -usb-sfp 后缀，回落到基础机型
+          if [ -z "$caps" ]; then
+            caps=$(awk -v b="${board%-usb-sfp}" '$1==b { $1=""; sub(/^[ \t]+/,""); print; exit }' /etc/ponwrt-device-caps.txt 2>/dev/null)
+          fi
           d=/etc/apk/repositories.d
           mkdir -p "$d"
           {
