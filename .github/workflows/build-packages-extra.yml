@@ -363,11 +363,11 @@ jobs:
           echo ">>> 已在树内摘除 kernel 元包与 gpio-button-hotplug 的包定义"
           rm -f tmp/.config-package.in tmp/.packageinfo tmp/.packagedeps
 
-          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=[my]/d' .config
+          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel|appfilter|open-app-filter|oaf)=[my]/d' .config
           sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel) is not set/d' .config
-          left=$(grep -cE '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true)
+          left=$(grep -cE '^CONFIG_PACKAGE_(kmod-[^=]*|kernel|appfilter|open-app-filter|oaf)=' .config || true)
           echo ">>> 剩余 kmod / kernel 选择：${left:-0}"
-          [ "${left:-0}" -eq 0 ] || { grep -E '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true; echo "::error::.config 里仍有 kmod 或 kernel 选择，会触发内核编译"; exit 1; }
+          [ "${left:-0}" -eq 0 ] || { grep -E '^CONFIG_PACKAGE_(kmod-[^=]*|kernel|appfilter|open-app-filter|oaf)=' .config || true; echo "::error::.config 里仍有 kmod 或 kernel 选择，会触发内核编译"; exit 1; }
 
       - name: Build host tools and toolchain
         run: |
@@ -399,9 +399,9 @@ jobs:
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               [ -f "$path/Makefile" ] || { echo "::warning::缺 Makefile：$path"; continue; }
-              hits=$(grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)' "$path/Makefile" | sed 's/^+//' | sort -u || true)
+              hits=$(grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug|appfilter|open-app-filter|oaf)' "$path/Makefile" | sed 's/^+//' | sort -u || true)
               [ -n "$hits" ] || continue
-              sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$path/Makefile"
+              sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug|appfilter|open-app-filter|oaf)//g' "$path/Makefile"
               sed -i -E '/^[[:space:]]*DEPENDS/ s/[[:space:]]+/ /g; /^[[:space:]]*DEPENDS/ s/[[:space:]]+$//' "$path/Makefile"
               touched=$((touched+1)); dumped=$((dumped+$(printf '%s\n' "$hits" | wc -l)))
               printf '%s\n' "$hits" >> /tmp/stripped-kmods.txt
@@ -430,12 +430,12 @@ jobs:
             exit 1
           }
           # oldconfig 会把 CONFIG_PACKAGE_kernel 之类的默认选项写回来，必须再摘一次
-          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=[my]/d' .config
-          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|kernel) is not set/d' .config
-          left=$(grep -cE '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true)
+          sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel|appfilter|open-app-filter|oaf)=[my]/d' .config
+          sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|kernel|appfilter|open-app-filter|oaf) is not set/d' .config
+          left=$(grep -cE '^CONFIG_PACKAGE_(kmod-[^=]*|kernel|appfilter|open-app-filter|oaf)=' .config || true)
           echo ">>> 元数据重建后剩余 kmod / kernel 选择：${left:-0}"
           [ "${left:-0}" -eq 0 ] || {
-            grep -E '^CONFIG_PACKAGE_(kmod-[^=]*|kernel)=' .config || true
+            grep -E '^CONFIG_PACKAGE_(kmod-[^=]*|kernel|appfilter|open-app-filter|oaf)=' .config || true
             echo "::error::重建包元数据后 .config 仍带 kmod 或 kernel 选择"
             exit 1
           }
@@ -453,8 +453,8 @@ jobs:
           #    scripts/pkg-name-map.sh 映射后再写 .config；符号是否存在由 oldconfig 后的
           #    .config 硬校验判定（映射覆盖不到的真名错误会在此报红，不静默丢）。
           strip_pkg_sel() {
-            sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel)=[my]/d' .config
-            sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|kernel) is not set/d' .config
+            sed -i -E '/^CONFIG_PACKAGE_(kmod-[^=]*|gpio-button-hotplug|kernel|appfilter|open-app-filter|oaf)=[my]/d' .config
+            sed -i -E '/^# CONFIG_PACKAGE_(kmod-[^=]*|kernel|appfilter|open-app-filter|oaf) is not set/d' .config
           }
           . scripts/pkg-name-map.sh
           only_pkgs="${{ inputs.only }}"
