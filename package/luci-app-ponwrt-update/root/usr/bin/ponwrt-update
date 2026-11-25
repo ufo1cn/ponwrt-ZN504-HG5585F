@@ -41,18 +41,28 @@ dev_name() {
 		b=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
 	fi
 	b=$(printf '%s' "$b" | tr ',' '_' | tr -d ' ')
-	# -usb-sfp 变体没有独立产物，发布的索引只有基础机型，索引键必须剥掉后缀
-	[ -n "$b" ] && printf '%s' "${b%-usb-sfp}"
+	[ -n "$b" ] || b=$(vget device)
+	printf '%s' "$b"
 	return 0
 }
 
-# 展示用的真实硬件型号：保留 -usb-sfp 后缀，LuCI 才能区分光口版和纯 USB 版
-dev_model() {
-	b=$(cat /tmp/sysinfo/board_name 2>/dev/null)
-	[ -n "$b" ] || b=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
-	b=$(printf '%s' "$b" | tr ',' '_' | tr -d ' ')
-	[ -n "$b" ] || b=$(vget device)
-	printf '%s' "$b"
+# 拉索引：先用本机真实型号（含 -usb-sfp，与发布端一一对应），
+# 拿不到再回落到基础机型（光口版刷的是合并镜像、还没单独发索引时走这条）。
+IDX_DEV=""
+idx_fetch() {
+	IDX_DEV=""
+	d=$(dev_name)
+	[ -n "$d" ] || return 1
+	if fetch -fsSL --connect-timeout 10 --retry 2 "$(idx_base)/$d.json" -o "$1" 2>/dev/null; then
+		IDX_DEV="$d"
+		return 0
+	fi
+	d2=${d%-usb-sfp}
+	if [ "$d2" != "$d" ] && fetch -fsSL --connect-timeout 10 --retry 2 "$(idx_base)/$d2.json" -o "$1" 2>/dev/null; then
+		IDX_DEV="$d2"
+		return 0
+	fi
+	return 1
 }
 
 # 能力按本机 board_name 查 /etc/ponwrt-device-caps.txt：一次构建多机型时，
@@ -153,7 +163,7 @@ rpc_status() {
 	. "$JSHN"
 	json_init
 	json_add_boolean ok 1
-	json_add_string device "$(dev_model)"
+	json_add_string device "$(dev_name)"
 	json_add_string feature_class "$(dev_caps)"
 	json_add_string commit "$(vget commit_short)"
 	json_add_string built_at "$(vget built_at)"
@@ -215,7 +225,7 @@ rpc_check() {
 		return 0
 	}
 	iurl="$(idx_base)/$dev.json"
-	if ! fetch -fsSL --connect-timeout 10 --retry 2 "$iurl" -o "$tmp" 2>/dev/null; then
+	if ! idx_fetch "$tmp"; then
 		rm -f "$tmp"
 		json_add_boolean ok 0
 		json_add_string error "拉取更新索引失败：$iurl"
@@ -350,7 +360,7 @@ out_mode() {
 }
 
 cli_status() {
-	echo "设备：$(dev_model)（能力 $(dev_caps)）"
+	echo "设备：$(dev_name)（能力 $(dev_caps)）"
 	echo "本地版本：commit $(vget commit_short)，run $(vget run)，构建于 $(vget built_at)"
 	echo "内核：$(uname -r 2>/dev/null)"
 	echo "出站方式：$(out_mode)"
@@ -367,7 +377,7 @@ cli_check() {
 	echo "出站：$(out_mode)；索引：$(idx_base)"
 	[ -n "$dev" ] || { echo "版本戳里没有 device 字段"; exit 1; }
 	tmp=$(mktemp) || exit 1
-	if ! fetch -fsSL --connect-timeout 10 --retry 2 "$(idx_base)/$dev.json" -o "$tmp"; then
+	if ! idx_fetch "$tmp"; then
 		echo "拉取更新索引失败：$(idx_base)/$dev.json"
 		rm -f "$tmp"
 		exit 2
@@ -397,7 +407,7 @@ cli_download() {
 	dev=$(dev_name)
 	[ -n "$dev" ] || { echo "缺少 device 字段"; exit 1; }
 	tmp=$(mktemp) || exit 1
-	if ! fetch -fsSL --connect-timeout 10 --retry 2 "$(idx_base)/$dev.json" -o "$tmp"; then
+	if ! idx_fetch "$tmp"; then
 		echo "索引拉取失败"; rm -f "$tmp"; exit 2
 	fi
 	r_url=$(jsonfilter -i "$tmp" -e '@.sysupgrade.url' 2>/dev/null)
