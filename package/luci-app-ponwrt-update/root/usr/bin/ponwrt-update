@@ -41,8 +41,18 @@ dev_name() {
 		b=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
 	fi
 	b=$(printf '%s' "$b" | tr ',' '_' | tr -d ' ')
-	[ -n "$b" ] && printf '%s' "$b"
+	# -usb-sfp 变体没有独立产物，发布的索引只有基础机型，索引键必须剥掉后缀
+	[ -n "$b" ] && printf '%s' "${b%-usb-sfp}"
 	return 0
+}
+
+# 展示用的真实硬件型号：保留 -usb-sfp 后缀，LuCI 才能区分光口版和纯 USB 版
+dev_model() {
+	b=$(cat /tmp/sysinfo/board_name 2>/dev/null)
+	[ -n "$b" ] || b=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1)
+	b=$(printf '%s' "$b" | tr ',' '_' | tr -d ' ')
+	[ -n "$b" ] || b=$(vget device)
+	printf '%s' "$b"
 }
 
 # 能力按本机 board_name 查 /etc/ponwrt-device-caps.txt：一次构建多机型时，
@@ -143,7 +153,7 @@ rpc_status() {
 	. "$JSHN"
 	json_init
 	json_add_boolean ok 1
-	json_add_string device "$(dev_name)"
+	json_add_string device "$(dev_model)"
 	json_add_string feature_class "$(dev_caps)"
 	json_add_string commit "$(vget commit_short)"
 	json_add_string built_at "$(vget built_at)"
@@ -340,7 +350,7 @@ out_mode() {
 }
 
 cli_status() {
-	echo "设备：$(dev_name)（能力 $(dev_caps)）"
+	echo "设备：$(dev_model)（能力 $(dev_caps)）"
 	echo "本地版本：commit $(vget commit_short)，run $(vget run)，构建于 $(vget built_at)"
 	echo "内核：$(uname -r 2>/dev/null)"
 	echo "出站方式：$(out_mode)"
