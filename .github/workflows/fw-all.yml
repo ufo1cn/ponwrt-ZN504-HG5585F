@@ -1,18 +1,16 @@
 name: PonWrt 固件构建（全机型）
 
 # ==============================================================================
-# 一个入口编三台机型：usb-wifi / usb / plain。
+# 一个入口、一次构建、三台机型：usb-wifi / usb / plain。
 #
-# 为什么放在一个工作流里：三台机型的**内核与 kmod 完全统一**（同一套符号、同一
-# 指纹），重复编内核纯属浪费。这里用 max-parallel=1 的顺序矩阵，配合 fw-build.yml
-# 里统一的内核树缓存 key（不再按 label 分叉），第 2、3 台直接复用第 1 台编好的
-# toolchain + 内核树，只做「装机 + 打镜像」，不重编内核。
+# 沿用上游 build-zn504.yml 的做法：一次 make 里同时选中多个 DEVICE，内核与全部
+# kmod 只编一遍（所有 kmod 一律 =m，只出 apk、不进镜像），最后由各机型的
+# Device 定义（DEVICE_PACKAGES）决定哪些包装进它自己的镜像。
 #
 # 每台机型装什么，只由 configs/devices/<board>.config 决定：
 #   DEVICE_CAPS        能力（usb / wifi / bt）
-#   DEVICE_PREINSTALL  预装进该机型 rootfs 的包清单 → 写进 Device 定义（DEVICE_PACKAGES）
-# 全局 .config 里的 kmod 一律 =m（编出 apk、不进镜像），所以能力弱的机型不会被
-# 塞进 USB / 无线驱动。
+#   DEVICE_PREINSTALL  预装进该机型 rootfs 的包清单
+# 工作流把这些清单写进对应 Device 定义，所以一次构建也能做到“按机型能力装包”。
 # ==============================================================================
 
 on:
@@ -35,28 +33,17 @@ on:
 
 concurrency:
   group: fw-all-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
-  firmware:
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - board: fiberhome_hg5585f-ct
-            label: usb-wifi
-          - board: nokia_xg-040g-md-ubi
-            label: usb
-          - board: fiberhome_hg5382a
-            label: plain
+  build:
     uses: ./.github/workflows/fw-build.yml
     with:
-      label: ${{ matrix.label }}
-      device_list: ${{ matrix.board }}
+      label: 'all'
+      device_list: 'fiberhome_hg5585f-ct nokia_xg-040g-md-ubi fiberhome_hg5382a'
       upload_release: ${{ inputs.upload_release }}
       cache_mode: ${{ inputs.cache_mode }}
     secrets: inherit
