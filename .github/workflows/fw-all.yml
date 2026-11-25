@@ -43,7 +43,7 @@ jobs:
     uses: ./.github/workflows/fw-build.yml
     with:
       label: 'all'
-      device_list: 'fiberhome_hg5585f-ct nokia_xg-040g-md-ubi fiberhome_hg5382a'
+      device_list: 'fiberhome_hg5585f-ct fiberhome_hg5585f-ct-usb-sfp nokia_xg-040g-md-ubi znxt_zn504xg-d fiberhome_hg5382a'
       upload_release: ${{ inputs.upload_release }}
       cache_mode: ${{ inputs.cache_mode }}
     secrets: inherit
