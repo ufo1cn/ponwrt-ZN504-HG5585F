@@ -113,8 +113,10 @@ jobs:
           rows = [l.rstrip('\n').split('\t') for l in open(tsv, encoding='utf-8') if l.strip()]
           lines = open(mk, encoding='utf-8').read().splitlines()
           for board, pkgs in rows:
+              # 空清单也要先把旧标记删掉，避免和上一版残留叠在一起
+              lines = [l for l in lines if 'ponwrt-preinstall:' + board not in l]
               if not pkgs.strip():
-                  print('>>> %s 无预装包，跳过注入' % board)
+                  print('>>> %s 无预装包，跳过注入（并清掉旧标记）' % board)
                   continue
               start = None
               for i, l in enumerate(lines):
@@ -130,7 +132,6 @@ jobs:
                       break
               if end is None:
                   sys.exit('::error::Device/%s 的 define 块没有 endef' % board)
-              lines = [l for l in lines if 'ponwrt-preinstall:' + board not in l]
               start = None
               for i, l in enumerate(lines):
                   if l.strip() == 'define Device/' + board:
@@ -144,10 +145,19 @@ jobs:
               print('>>> 注入 Device/%s：%d 个预装包' % (board, len(pkgs.split())))
           open(mk, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines) + '\n')
           PY
-          for dev in $DEVICES; do
-            grep -q "ponwrt-preinstall:${dev}" target/linux/airoha/image/an7581.mk \
-              || { echo "::error::Device/${dev} 的预装包没有落进 an7581.mk"; exit 1; }
-          done
+          # 逐机型核对：有预装清单的必须有标记行，清单为空的必须没有标记行
+          while IFS='\t' read -r dev pre; do
+            [ -n "$dev" ] || continue
+            if [ -n "${pre// /}" ]; then
+              grep -q "ponwrt-preinstall:${dev}" target/linux/airoha/image/an7581.mk \
+                || { echo "::error::Device/${dev} 的预装包没有落进 an7581.mk"; exit 1; }
+            else
+              if grep -q "ponwrt-preinstall:${dev}" target/linux/airoha/image/an7581.mk; then
+                echo "::error::Device/${dev} 预装清单为空，但 an7581.mk 里还留着标记行"; exit 1
+              fi
+              echo ">>> ${dev} 预装清单为空：an7581.mk 无注入，符合定义"
+            fi
+          done < /tmp/dev-pre.tsv
           echo ">>> 机型定义加载完成"
 
 
