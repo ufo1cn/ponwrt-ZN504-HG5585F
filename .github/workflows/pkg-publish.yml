@@ -407,6 +407,7 @@ jobs:
           [ -n "$APKBIN" ] || { echo "::error::找不到 host apk（pubtool/apk）"; exit 1; }
           chmod +x "$APKBIN"
           KVER="${{ steps.kver.outputs.kver }}"
+          GROUPS_IN="${{ inputs.groups }}"
           PRUNE="${{ inputs.prune }}"
           REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${DST_REPO}.git"
           rm -rf repo
@@ -426,6 +427,23 @@ jobs:
             fi
           else
             cp -f public-key.pem repo/public-key.pem
+          fi
+
+          # 内核魔数清理：固件流产出的 kmod 与内核 vermagic 强绑定（每个 kmod 的 depends 里
+          # 都带 kernel=<内核版本>~<魔数>-r1），内核版本或内核配置一变，旧 kmod 全部装不上。
+          # 所以发布 kmods（或 groups=all 一并发）时，先把目标内核目录下所有 kmod-*.apk 清掉，
+          # 再由本次构建的 kmod 覆盖回来：本次没编出来的 kmod 就此消失，仓库里只留匹配当前内核的。
+          # 非内核包（应用/lib/固件）不动，历史固件的 kmod 仍在对应 Release 的 kmods-all-rNN 里。
+          if [ "$GROUPS_IN" = "kmods" ] || [ "$GROUPS_IN" = "all" ]; then
+            for d in repo/aarch64_cortex-a53/ponwrt-k${KVER}/*/; do
+              [ -d "$d" ] || continue
+              feat=$(basename "$d")
+              n=$(ls -1 "$d"kmod-*.apk 2>/dev/null | wc -l)
+              if [ "$n" -gt 0 ]; then
+                rm -f "$d"kmod-*.apk
+                echo ">>> 内核魔数清理：ponwrt-k${KVER}/$feat 删除 $n 个旧 kmod（本次构建重新写入）"
+              fi
+            done
           fi
 
           for d in stage/*/; do
@@ -448,12 +466,18 @@ jobs:
             done
           done
 
-          # 逐能力重建索引：对目录里真实存在的 apk 全量做，索引与内容永远一致
-          for d in stage/*/; do
-            feat=$(basename "$d")
-            DEST="repo/aarch64_cortex-a53/ponwrt-k${KVER}/$feat"
-            apks=( "$DEST"/*.apk )
-            if [ ${#apks[@]} -eq 0 ]; then continue; fi
+          # 逐能力重建索引：对目录里真实存在的 apk 全量做，索引与内容永远一致。
+          # 注意遍历的是仓库里已存在的目录（不是本次 stage 的目录）：kmods 清理可能把某个
+          # 能力目录的 kmod 删空，这种目录同样必须重建索引/SHA256SUMS，否则索引指向已删除的包。
+          for DEST in repo/aarch64_cortex-a53/ponwrt-k${KVER}/*/; do
+            [ -d "$DEST" ] || continue
+            feat=$(basename "$DEST")
+            apks=( "$DEST"*.apk )
+            if [ ${#apks[@]} -eq 0 ]; then
+              rm -f "$DEST/packages.adb" "$DEST/SHA256SUMS"
+              echo ">>> ponwrt-k${KVER}/$feat：已无 apk，删除索引"
+              continue
+            fi
             if ! "$APKBIN" mkndx --root "$PWD/keys" --keys-dir "$PWD/keys" \
                  --sign "$PWD/private-key.pem" --output "$DEST/packages.adb" "${apks[@]}" 2>"/tmp/idx-$feat.err"; then
               cat "/tmp/idx-$feat.err"
