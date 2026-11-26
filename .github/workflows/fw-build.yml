@@ -885,14 +885,16 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          if [ -f public-key.pem ]; then
-            cp -f public-key.pem kmods/public-key.pem
-            ( cd kmods && sha256sum public-key.pem > public-key.pem.sha256 )
-            echo ">>> 公钥指纹：$(sha256sum kmods/public-key.pem | cut -d' ' -f1)"
-          else
-            echo "::error::没有 public-key.pem，kmod apk 无法在设备上验签"
-            exit 1
+          # public-key.pem 由「Install fixed apk signing key」在编译阶段生成。
+          # 构建被取消/没跑起来时这个文件不存在，这里只告警跳过，不判失败——
+          # 否则一次主动取消会额外多出一个假的“编译错误”。
+          if [ ! -f public-key.pem ]; then
+            echo "::warning::没有 public-key.pem（构建未完成或已取消），跳过公钥导出"
+            exit 0
           fi
+          cp -f public-key.pem kmods/public-key.pem
+          ( cd kmods && sha256sum public-key.pem > public-key.pem.sha256 )
+          echo ">>> 公钥指纹：$(sha256sum kmods/public-key.pem | cut -d' ' -f1)"
           # 同一个 host apk 二进制给 pkg-publish 用，索引工具版本才不会打架
           mkdir -p pubtool
           for c in staging_dir/host/bin/apk build_dir/host*/apk-*/apk; do
@@ -1409,10 +1411,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          shopt -s nullglob
-          files=(kmods/*.apk kmods/public-key.pem kmods/public-key.pem.sha256)
+          # 只收集真实存在的文件。nullglob 不作用于字面路径（kmods/public-key.pem 写死在
+          # 数组里），缺文件时 gh 会报 `no matches found` 并让整个 job 失败——那属于
+          # “构建被取消/没跑起来”，不该记成编译失败。
+          files=()
+          for f in kmods/*.apk kmods/public-key.pem kmods/public-key.pem.sha256; do
+            [ -f "$f" ] && files+=("$f")
+          done
           if [ ${#files[@]} -eq 0 ]; then
-            echo "::warning::没有 kmod 产物，跳过预发布"
+            echo "::warning::没有 kmod 产物（构建未完成或已取消），跳过预发布"
             exit 0
           fi
           tag="kmods-${{ inputs.label }}-r${{ github.run_number }}"
