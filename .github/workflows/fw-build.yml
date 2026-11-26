@@ -278,6 +278,16 @@ jobs:
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # 去重：open-app-filter 同时存在于 immortalwrt/packages 与 destan19/OpenAppFilter
+          # 两个 feed，两份 Makefile 都定义了 Package/appfilter + KernelPackage/oaf，
+          # 同时存在会让 .config-package.in 里出现 PACKAGE_kmod-oaf 自选，
+          # CONFIG_PACKAGE_appfilter=m 被静默丢弃（r51 实证：config-all 里是 is not set）。
+          # 保留 packages feed 那份（其 PKG_SOURCE 已 pin 到 destan19 同一 commit），
+          # 只删 oaf feed 里的重复目录；luci-app-oaf 仍从 oaf feed 保留。
+          rm -rf package/feeds/oaf/open-app-filter package/feeds/oaf/oaf
+          echo "[oaf-dedupe] 剩余 appfilter/oaf 定义："
+          grep -rl 'define Package/appfilter' package/feeds 2>/dev/null | sed 's/^/  /' || true
+          grep -rl 'define KernelPackage/oaf' package/feeds 2>/dev/null | sed 's/^/  /' || true
 
       - name: Prepare custom packages
         run: |
