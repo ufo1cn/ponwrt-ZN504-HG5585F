@@ -775,6 +775,31 @@ jobs:
           find build_dir/target-* -maxdepth 3 -name '*base-files*' -path '*stamp*' -exec rm -rf {} + 2>/dev/null || true
           echo ">>> base-files 构建状态已清除"
 
+      - name: Point update app at the matching apk-repo branch
+        run: |
+          set -euo pipefail
+          # 固件更新索引在 apk 仓的哪个分支：主线 repo、WED repo-wed。
+          # 索引地址就是 <index_base>/<device>.json，所以必须和本次构建的 apk_repo_branch 一致，
+          # 否则 WED 固件会去读主线索引（或被主线固件反过来读到 WED 索引）。
+          BR="${{ inputs.apk_repo_branch }}"
+          files="package/luci-app-ponwrt-update/root/etc/config/ponwrt_update
+          package/luci-app-ponwrt-update/root/usr/bin/ponwrt-update
+          package/luci-app-ponwrt-update/root/usr/bin/ponwrt-fw-check
+          package/luci-app-ponwrt-update/htdocs/luci-static/resources/view/ponwrt_update/overview.js"
+          for f in $files; do
+            [ -f "$f" ] || { echo "::error::缺文件 $f"; exit 1; }
+            sed -i -E "s#(ufo1cn/ponwrt-apk-repo)/[^/]+(/meta/fw)#\1/${BR}\2#g" "$f"
+          done
+          n=$(grep -rF "ponwrt-apk-repo/${BR}/meta/fw" $files | wc -l)
+          [ "$n" -gt 0 ] || { echo "::error::更新索引地址没指向 ${BR}"; exit 1; }
+          if [ "$BR" != "repo" ]; then
+            if grep -rF "ponwrt-apk-repo/repo/meta/fw" $files; then
+              echo "::error::仍有指向 repo 的更新索引"
+              exit 1
+            fi
+          fi
+          echo ">>> 固件更新索引分支：${BR}（$n 处已改写）"
+
       - name: Inject firmware version stamp
         run: |
           set -euo pipefail
@@ -1211,6 +1236,11 @@ jobs:
               || { echo "::error::repositories.d 里的源地址没启用"; exit 1; }
             echo ">>> repositories.d 地址条目也在"
           fi
+          f4=$(ls build_dir/target-*/root-*/etc/config/ponwrt_update 2>/dev/null | head -n1 || true)
+          [ -n "$f4" ] || { echo "::error::镜像内缺 /etc/config/ponwrt_update"; exit 1; }
+          grep -q "ponwrt-apk-repo/${{ inputs.apk_repo_branch }}/meta/fw" "$f4" \
+            || { echo "::error::固件更新索引没指向 ${{ inputs.apk_repo_branch }}"; exit 1; }
+          echo ">>> 固件更新索引分支：${{ inputs.apk_repo_branch }}"
           echo ">>> 镜像自检通过：固定公钥 + 仓库地址都在"
 
       - name: Organize output files
