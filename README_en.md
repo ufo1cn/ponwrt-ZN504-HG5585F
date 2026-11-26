@@ -2,18 +2,24 @@
 
 [简体中文](README.md) | English
 
-[![GitHub Actions Build Status](https://img.shields.io/github/actions/workflow/status/wuziwei/ponwrt-ZN504-HG5585F/build-zn504.yml?branch=master&style=flat-square&logo=github)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F/actions)
-[![Latest Release](https://img.shields.io/github/v/release/wuziwei/ponwrt-ZN504-HG5585F?style=flat-square&logo=github)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F/releases)
-[![Target](https://img.shields.io/badge/SoC-Airoha%20AN7581-blue?style=flat-square)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F)
-[![Device](https://img.shields.io/badge/Device-ZN504%20%26%20HG5585F-green?style=flat-square)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F)
-[![Kernel](https://img.shields.io/badge/Kernel-Linux%206.18-informational?style=flat-square)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F)
+[![GitHub Actions Build Status](https://img.shields.io/github/actions/workflow/status/ufo1cn/ponwrt-ZN504-HG5585F/fw-all.yml?branch=master&style=flat-square&logo=github)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/actions)
+[![Latest Release](https://img.shields.io/github/v/release/ufo1cn/ponwrt-ZN504-HG5585F?style=flat-square&logo=github)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases)
+[![Target](https://img.shields.io/badge/SoC-Airoha%20AN7581-blue?style=flat-square)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F)
+[![Device](https://img.shields.io/badge/Device-5%20models-green?style=flat-square)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F)
+[![Kernel](https://img.shields.io/badge/Kernel-Linux%206.18-informational?style=flat-square)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F)
 [![License](https://img.shields.io/badge/License-GPL--2.0-orange?style=flat-square)](LICENSE)
 
-Customized and performance-enhanced [PonWrt](https://github.com/pbs05/ponwrt) (based on [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) / Linux `6.18`) firmware engineered for dual flagship Airoha AN7581 optical gateways:
-* **ZN504XG-D (`znxt_zn504xg-d`)**: Pure wired 2.5G high-performance ONT (EN8811H 2.5G port + 3×GbE)
-* **FiberHome HG5585F CT (`fiberhome_hg5585f-ct`)**: Wi-Fi 6 ONT (Airoha AN7581 + MT7916D DBDC AX3000 + 4-core IRQ affinity scheduling, native USB 2.0 configuration)
+Customized and performance-enhanced [PonWrt](https://github.com/pbs05/ponwrt) (based on [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) / Linux `6.18`) firmware engineered for five Airoha AN7581 optical gateways. A single `fw-all` build produces all of them:
 
-Every release automatically compiles and packages **both devices** into separate flashable images!
+| Device | profile | Hardware / caps |
+| :--- | :--- | :--- |
+| ZN504XG-D | `znxt_zn504xg-d` | Pure wired 2.5G (EN8811H + 3×GbE), USB |
+| FiberHome HG5382A | `fiberhome_hg5382a` | plain baseline (only `kmod-zram` + `zram-swap`) |
+| FiberHome HG5585F CT | `fiberhome_hg5585f-ct` | MT7916D DBDC AX3000 + USB 2.0 + BT |
+| FiberHome HG5585F CT (USB/SFP) | `fiberhome_hg5585f-ct-usb-sfp` | same + `kmod-phy-maxlinear` |
+| Nokia XG-040G-MD UBI | `nokia_xg-040g-md-ubi` | USB + BT |
+
+Preinstall scope is driven solely by `DEVICE_CAPS` / `DEVICE_PREINSTALL` in `configs/devices/<board>.config`; applications (OpenClash / SQM / honk / passwall2 …) are never baked into images and ship as standalone apks instead.
 
 ---
 
@@ -32,7 +38,7 @@ The table below details the technical generational gap between our enhanced PonW
 | **Out-of-the-box br-iptv Proxy** | ❌ No pre-built bridge, manual setup needed; legacy udpxy prone to L2 echo loops | ✅ **Pre-configured isolated bridge `br-iptv` (`isolate=1, learning=0`)** + `rtp2httpd` 4022 zero-copy proxy & Web player, **instant playback across all devices** |
 | **Dual-Stack Hardware Offload (PPE)** | ⚠️ Missing bridge offload patch leaves downlink offload at 17%; IPv6 PPPoE drops packets forcing users to disable HW acceleration | ✅ **Exclusive Patches 931/932 fix AN7581 PPE & bridge slave offload**: IPv4+IPv6 dual-stack 100% hardware direct routing, **gigabit wire-speed CPU ~4%, downlink offload rate up to 90%+** |
 | **Pure Cryptographic Pipeline** | ⚠️ Retains SafeXcel / EIP-93 coprocessor, causing Crypto API priority inversion and DMA penalties | ✅ **Completely eliminated `kmod-crypto-hw-eip93`**, unleashing 4-core 1.2GHz ARMv8 NEON vector compute, **WireGuard/Sing-Box lower jitter & higher throughput** |
-| **Sing-Box Native NFQUEUE & Honk eBPF** | ❌ Missing `kmod-nft-queue` and `kmod-veth` drivers, crashing transparent proxy; relies on fragile scripts | ✅ **Native `kmod-veth`, NFQUEUE kernel drivers + latest `sing-box 1.15.0-alpha.13` & `honk 0.1.0-beta.6`**, **native TUN zero-copy & eBPF dual-engine gateway** |
+| **Sing-Box Native NFQUEUE & Honk eBPF** | ❌ Missing `kmod-nft-queue` / `kmod-veth`, transparent proxy crashes; relies on fragile scripts | ✅ **Images ship `kmod-veth` / `kmod-sched-bpf` / `kmod-nf-conntrack`, with sing-box `1.15.0-alpha.13` baked in**; the two NFQUEUE kmods (`kmod-nft-queue` / `kmod-nfnetlink-queue`) and `honk 0.1.0-beta.6` (`honk` + `luci-app-honk` + zh-CN i18n, `honk-core` fetched at runtime by `honk-install`) are delivered as **standalone apks**, **native TUN and eBPF gateways on demand** |
 | **Modern CI/CD Pipeline** | ⚠️ Single runner without compiler fingerprint matching, build takes 2~4 hours with frequent APT timeouts | ✅ **Ubuntu 24.04 + Node 24 + CCACHE compiler fingerprinting**, 5GB incremental cache, **build time slashed to 20~35 minutes with 99%+ reliability** |
 
 ---
@@ -211,14 +217,35 @@ When both ports and the STB LAN port are bridged into a single bridge (`br-iptv`
 
 ## 📦 Firmware Downloads (Releases)
 
-Download production-tested images from [GitHub Releases](https://github.com/wuziwei/ponwrt-ZN504-HG5585F/releases) (4 clean images per build):
+Download field-tested images from [GitHub Releases](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases). Each `fw-all` release carries **32 assets** for five devices: 10 images (5 × `squashfs-sysupgrade` + `initramfs-recovery`), 10 `.sha256`, 4 `manifest-*.json`, `config-all.txt` and `build-info.txt`.
 
-| Target Device | Firmware Filename | Usage |
+| Device | Image prefix | Usage |
 | :--- | :--- | :--- |
-| **ZN504XG-D** | `ponwrt-airoha-an7581-znxt_zn504xg-d-squashfs-sysupgrade.itb` | **Standard Sysupgrade (Recommended)**, preserves settings |
-| **ZN504XG-D** | `ponwrt-airoha-an7581-znxt_zn504xg-d-initramfs-recovery.itb` | **U-Boot Web Recovery / Unbrick** |
-| **HG5585F (CT Telecom)** | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-squashfs-sysupgrade.itb` | **Standard Sysupgrade (Recommended)**, native USB 2.0 & MT7916 Wi-Fi |
-| **HG5585F (CT Telecom)** | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-initramfs-recovery.itb` | **U-Boot Web Recovery / Unbrick** |
+| ZN504XG-D | `ponwrt-airoha-an7581-znxt_zn504xg-d-` | `*-squashfs-sysupgrade.itb` keeps settings; `*-initramfs-recovery.itb` for U-Boot Web recovery |
+| FiberHome HG5382A | `ponwrt-airoha-an7581-fiberhome_hg5382a-` | same (plain baseline) |
+| FiberHome HG5585F CT | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-` | same (USB + Wi-Fi + BT) |
+| FiberHome HG5585F CT (USB/SFP) | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | same (+ `kmod-phy-maxlinear`) |
+| Nokia XG-040G-MD UBI | `ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-` | same (USB + BT) |
+
+Tag scheme `v<date>-<time>-<label>-r<run>`: `label=all` for the five mainline devices, `label=wed` for the WED/NPU-offload experiment (two HG5585F images, artifacts only, no version index). Kernel modules and standalone apps are published as prereleases `kmods-all-r<run>` and `pkgs-extra-<device>-r<run>`.
+
+---
+
+## 🧩 Standalone Packages & apk Repository
+
+Images only carry "device caps + baseline" packages; applications ship as apks and stay optional:
+
+- **Kernel modules**: built in the same tree/config as the firmware, published in `kmods-all-r<run>` (578 apks + `public-key.pem`), vermagic matches the images.
+- **Standalone apps**: `pkgs-extra-<device>-r<run>` — OpenClash, SQM suite, `bash`, `ruby` + `ruby-yaml`, `unzip`, `honk` + `luci-app-honk` + zh-CN i18n, passwall2 dependency chain (`lyaml` / `libyaml` / `libuci-lua`) and more.
+- **Online feed**: `ufo1cn/ponwrt-apk-repo`, index branch `repo` (`repo-wed` for WED experiments), layout `aarch64_cortex-a53/ponwrt-k<kver>/<common|usb|wifi|bt>/`. On first boot the image generates `/etc/apk/repositories.d/90-ponwrt-apk-repo.list` from the device capability table.
+- **Signing**: one fixed private key for the whole repo, public-key fingerprint `d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed`, asserted by both build and publish workflows.
+
+`honk` and `luci-app-honk` are **not preinstalled in any image** (`bpftool` / `tar` are "include-if-present" dependencies so kconfig cannot hide the package); install on demand:
+
+```sh
+apk update
+apk add honk luci-app-honk
+```
 
 ---
 
@@ -412,7 +439,7 @@ With `nfnetlink_queue` compiled in, Sing-Box handles redirection natively. Per [
 
 ```bash
 # 1. Clone repository & update feeds
-git clone https://github.com/wuziwei/ponwrt-ZN504.git
+git clone https://github.com/ufo1cn/ponwrt-ZN504-HG5585F.git
 cd ponwrt-ZN504
 ./scripts/feeds update -a && ./scripts/feeds install -a
 bash ./scripts/customize.sh

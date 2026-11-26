@@ -1,8 +1,13 @@
 # PonWrt
 
-[English](README.md) | 简体中文
+[English](README_en.md) | 简体中文
 
 PonWrt 基于 [ImmortalWrt](https://github.com/immortalwrt/immortalwrt)，增加了对 Airoha AN7581 和 AN7583 PON 设备的支持。
+
+> 本仓（`ufo1cn/ponwrt-ZN504-HG5585F`）的实际发布口径见 [README.md](README.md)：一次 `fw-all` 构建编五台机型
+> （`znxt_zn504xg-d` / `fiberhome_hg5382a` / `fiberhome_hg5585f-ct` / `fiberhome_hg5585f-ct-usb-sfp` / `nokia_xg-040g-md-ubi`），
+> 应用类软件（OpenClash / SQM / honk / passwall2 依赖链等）不进镜像，统一以独立 apk 发布到 `ufo1cn/ponwrt-apk-repo`。
+> 下表是上游 PonWrt 支持的设备全集，仅作参考。
 
 ## ⚠️ 免责声明
 

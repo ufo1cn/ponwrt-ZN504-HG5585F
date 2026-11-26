@@ -25,10 +25,10 @@
 
 | Device | 能力 | 预装口径 |
 | --- | --- | --- |
-| `fiberhome_hg5585f-ct` | usb wifi bt | 全量 USB/WiFi/BT 预装 + `block-mount` + `honk` + `zram` |
+| `fiberhome_hg5585f-ct` | usb wifi bt | 全量 USB/WiFi/BT 预装 + `block-mount` + `zram`（honk 不预装，见第五节） |
 | `fiberhome_hg5585f-ct-usb-sfp` | usb wifi bt | 同上，另加 `kmod-phy-maxlinear` |
-| `nokia_xg-040g-md-ubi` | usb bt | USB/BT 预装 + `honk` + `zram` |
-| `znxt_zn504xg-d` | usb | USB 预装（去 `kmod-mt7915e`/`kmod-mt7916-firmware`）+ `honk` + `zram` |
+| `nokia_xg-040g-md-ubi` | usb bt | USB/BT 预装 + `zram`（honk 不预装） |
+| `znxt_zn504xg-d` | usb | USB 预装（去 `kmod-mt7915e`/`kmod-mt7916-firmware`）+ `zram`（honk 不预装） |
 | `fiberhome_hg5382a` | 无 | 只装 `kmod-zram zram-swap`（plain 基线） |
 
 能力只写一处：`configs/devices/<board>.config` 的 `DEVICE_CAPS`；装包清单写 `DEVICE_PREINSTALL`。工作流按能力表校验，能力表与清单不一致会直接失败。
@@ -54,7 +54,9 @@
 - `package/luci-app-honk`：内嵌 UI、中文菜单与 i18n、ACL
 - `files/usr/bin/sb` + `files/etc/nftables.d/30-sidestore.nft`：nft 侧分流规则
 - `package/luci-app-airoha-npu/root/usr/libexec/rpcd/luci.airoha_npu` 只摘了"按信道频率归频段统计站点"那段；上游整体版本缺 `fw_version` 读取，整体覆盖会让 NPU 面板回到 `Unknown`，故不覆盖。
-- 预装范围：四台完整机型；`hg5382a` 不预装（可用 `repo` 里的 apk 后装）。
+- **不预装进任何机型镜像**（`release.config` 里只写 `CONFIG_PACKAGE_honk=m` / `luci-app-honk=m`，`m` 只出 apk 不装机），需要时 `apk add honk luci-app-honk`；`luci-app-honk` 依赖的 `luci-lib-daeuniverse` 在树内、随包自动编出。
+- `honk` 的 `DEPENDS` 里 `bpftool` / `tar` 必须是「有就带」条件依赖（`+PACKAGE_bpftool-minimal:bpftool-minimal`、`+PACKAGE_tar:tar`）：`bpftool` 只是 `PROVIDES` 虚拟名（真实符号是 `bpftool-minimal` / `bpftool-full`，两个都没开时不可满足），`tar` 在本树包索引里没有符号，任一写成硬依赖都会让 kconfig 把 honk 连 `# ... is not set` 行都不生成，镜像与 apk 双双消失（此即 r38/r41 的成因）。
+- `build-packages-extra.yml` 的 Configure 自检里带 `CONFIG_PACKAGE_honk` / `CONFIG_PACKAGE_luci-app-honk`，符号被吞会直接失败而不是静默跳过。
 
 ## 六、运行时调优
 
@@ -92,7 +94,8 @@
 ## 九、软件包（不进镜像）
 
 - `tailscale` 加入 `configs/pon-userspace-packages.txt`，作为独立 apk 由包工作流产出、经 `pkg-publish` 入仓库；不预装进任何机型镜像。依赖的 `kmod-tun` 已在 `configs/an7581.config` 里常年 `=y`。
-- `honk`、`luci-app-honk` 同时在镜像（四台）与仓库里可装。
+- `honk` 三件套（`honk` / `luci-app-honk` / `luci-i18n-honk-zh-cn`）、`lyaml` / `libyaml` / `libuci-lua`（passwall2 依赖链）、OpenClash、SQM 全套（`sqm-scripts` / `luci-app-sqm` / i18n / `tc-tiny` / `nftables-json`）都只进 `pon-extra-packages.txt`，由 extra 流编成 apk，经 `pkg-publish` 入 apk-repo；`honk` 不再预装进镜像。
+- 已入库的一批可查 `pkgs-extra-hg5585f-ct-r34`（2026-11-26，含上述 honk 三件套与 lyaml/libyaml/libuci-lua）与 apk-repo `repo` 分支同一批 20 个 apk。
 - 三条包工作流的 kmod 口径：`Configure` 之后先删掉 `.config` 里全部 `CONFIG_PACKAGE_kmod-*` 与 `gpio-button-hotplug` 选择并断言剩余为 0，然后由预检扫描 `configs/pon-*.txt` 清单内每个 Makefile，凡出现 `$(LINUX_DIR)`、`${LINUX_DIR}`、`$(LINUX_KARCH)`、`vmlinux`、`KERNEL_MAKE` 直接失败。这类包（eBPF CO-RE、`perf`、`bpftool` 生成 `vmlinux.h` 等）的产物把内核结构体偏移和私有头锈进二进制，换内核 config 即失效，只能随固件一起编。
 
 ## 十、明确不做

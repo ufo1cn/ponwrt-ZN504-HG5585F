@@ -2,18 +2,24 @@
 
 简体中文 | [English](README_en.md)
 
-[![GitHub Actions Build Status](https://img.shields.io/github/actions/workflow/status/wuziwei/ponwrt-ZN504-HG5585F/build-zn504.yml?branch=master&style=flat-square&logo=github)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F/actions)
-[![Latest Release](https://img.shields.io/github/v/release/wuziwei/ponwrt-ZN504-HG5585F?style=flat-square&logo=github)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F/releases)
-[![Target](https://img.shields.io/badge/SoC-Airoha%20AN7581-blue?style=flat-square)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F)
-[![Device](https://img.shields.io/badge/Device-ZN504%20%26%20HG5585F-green?style=flat-square)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F)
-[![Kernel](https://img.shields.io/badge/Kernel-Linux%206.18-informational?style=flat-square)](https://github.com/wuziwei/ponwrt-ZN504-HG5585F)
+[![GitHub Actions Build Status](https://img.shields.io/github/actions/workflow/status/ufo1cn/ponwrt-ZN504-HG5585F/fw-all.yml?branch=master&style=flat-square&logo=github)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/actions)
+[![Latest Release](https://img.shields.io/github/v/release/ufo1cn/ponwrt-ZN504-HG5585F?style=flat-square&logo=github)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases)
+[![Target](https://img.shields.io/badge/SoC-Airoha%20AN7581-blue?style=flat-square)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F)
+[![Device](https://img.shields.io/badge/Device-5%20models-green?style=flat-square)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F)
+[![Kernel](https://img.shields.io/badge/Kernel-Linux%206.18-informational?style=flat-square)](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F)
 [![License](https://img.shields.io/badge/License-GPL--2.0-orange?style=flat-square)](LICENSE)
 
-本项目基于上游 [PonWrt](https://github.com/pbs05/ponwrt)（ImmortalWrt / Linux `6.18`），针对采用 **达发 Airoha AN7581 (4核 Cortex-A53 @ 1.2GHz + 8核 RISC-V NPU)** 主控的双旗舰机型进行深度工程化定制、硬件驱动加速与内核网络栈增强：
-* **兆能 ZN504XG-D (`znxt_zn504xg-d`)**：纯有线 2.5G 高性能光猫（EN8811H 2.5G 网口 + 3×千兆）；
-* **烽火 HG5585F 电信版 (`fiberhome_hg5585f-ct`)**：带 Wi-Fi 6 光猫（Airoha AN7581 + MT7916D DBDC AX3000 + 4核中断亲和智能调度，标准原生 USB 2.0 硬件配置）。
+本项目基于上游 [PonWrt](https://github.com/pbs05/ponwrt)（ImmortalWrt / Linux `6.18`），针对采用 **达发 Airoha AN7581 (4核 Cortex-A53 @ 1.2GHz + 8核 RISC-V NPU)** 主控的五款光猫进行深度工程化定制、硬件驱动加速与内核网络栈增强，一次 `fw-all` 构建同时产出全部机型：
 
-每次发布均**同时自动化编译并提供两款机型的固件包**！
+| 机型 | profile | 硬件/能力 |
+| :--- | :--- | :--- |
+| 兆能 ZN504XG-D | `znxt_zn504xg-d` | 纯有线 2.5G（EN8811H + 3×千兆），USB |
+| 烽火 HG5382A | `fiberhome_hg5382a` | plain 基线（仅 `kmod-zram` + `zram-swap`） |
+| 烽火 HG5585F 电信版 | `fiberhome_hg5585f-ct` | MT7916D DBDC AX3000 + USB 2.0 + BT |
+| 烽火 HG5585F 电信版（USB/SFP 版） | `fiberhome_hg5585f-ct-usb-sfp` | 同上 + `kmod-phy-maxlinear` |
+| 诺基亚 XG-040G-MD UBI | `nokia_xg-040g-md-ubi` | USB + BT |
+
+预装范围只由 `configs/devices/<board>.config` 的 `DEVICE_CAPS` / `DEVICE_PREINSTALL` 决定；应用类软件（OpenClash / SQM / honk / passwall2 等）不进镜像，统一走独立 apk（见「独立软件包与 apk 仓库」）。
 
 ---
 
@@ -32,7 +38,7 @@
 | **开箱即用 br-iptv 代理** | ❌ 无预置网桥与代理，需自行抓包建桥；旧版单栈 udpxy 易引发二层组播环路反射与端口占用 | ✅ **预置隔离网桥 `br-iptv`（`isolate=1, learning=0`）**，集成 `rtp2httpd` 端口 4022 多核并发零拷贝，附带 Web 播放器，**全屋网页秒开** |
 | **双栈硬件流卸载 (PPE)** | ⚠️ 常见固件缺少网桥卸载补丁导致下行卸载率仅 17%；IPv6 PPPoE 严重丢包卡死，迫使用户关闭加速 | ✅ **独家补丁 931/932 修复 AN7581 PPE 缺陷与网桥从端口卸载**：实现 IPv4+IPv6 双栈 100% 直转，**千兆满速 CPU 仅 ~4%，下行硬件卸载率飙升至 90%+** |
 | **纯净硬件加解密优化** | ⚠️ 保留 SafeXcel / EIP-93 协处理器驱动，诱发 Crypto API 优先级霸凌、DMA 性能倒挂与锁争用 | ✅ **彻底剔除 `kmod-crypto-hw-eip93` 负优化**，释放 4 核 1.2GHz ARMv8 NEON 向量直算，**小包 DMA 刷脏归零，WireGuard/Sing-Box 吞吐更稳** |
-| **Sing-Box 原生 NFQUEUE & Honk eBPF** | ❌ 缺失 `kmod-nft-queue` 与 `kmod-veth` 驱动，开透明代理必崩溃；依赖脆弱易冲突的自定义脚本 | ✅ **内核原生集成 `kmod-veth`、NFQUEUE 与最新 `sing-box 1.15.0-alpha.13` + `honk 0.1.0-beta.6`**，**原生 TUN 模式与 eBPF 零拷贝双核透明网关** |
+| **Sing-Box 原生 NFQUEUE & Honk eBPF** | ❌ 缺 `kmod-nft-queue` / `kmod-veth` 驱动，开透明代理必崩；靠易冲突的自定义脚本 | ✅ **镜像内置 `kmod-veth` / `kmod-sched-bpf` / `kmod-nf-conntrack`，`sing-box 1.15.0-alpha.13` 直接编进镜像**；NFQUEUE 两个 kmod（`kmod-nft-queue` / `kmod-nfnetlink-queue`）与 `honk 0.1.0-beta.6`（`honk` + `luci-app-honk` + 中文 i18n，`honk-core` 由 `honk-install` 运行时装）都以**独立 apk** 交付，**原生 TUN 与 eBPF 双路透明网关按需启用** |
 | **现代化 CI/CD 流水线** | ⚠️ 基础单任务无编译器指纹匹配，依赖易超时，编译动辄 2~4 小时且网络波动易断流 | ✅ **Ubuntu 24.04 + Node 24 + CCACHE 编译器指纹匹配**，5GB 增量编译缓存与多镜像测速回退，**构建大幅缩短至 20~35 分钟，成功率 99%+** |
 
 ---
@@ -214,14 +220,35 @@
 
 ## 📦 固件下载 (Releases)
 
-请前往 [GitHub Releases](https://github.com/wuziwei/ponwrt-ZN504-HG5585F/releases) 获取经过实机严格验收的固件包（每次精简输出纯净 **4 个固件**）：
+请前往 [GitHub Releases](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases) 获取实机验收过的固件。一次 `fw-all` 构建产出**五台机型**的产物，每个 Release 共 32 个资产：10 个镜像（5 台 × `squashfs-sysupgrade` + `initramfs-recovery`）、对应 10 个 `.sha256`、4 个 `manifest-*.json`、`config-all.txt`、`build-info.txt`。
 
-| 适用设备 | 固件文件名 | 适用场景 |
+| 机型 | 镜像名前缀 | 适用场景 |
 | :--- | :--- | :--- |
-| **兆能 ZN504XG-D** | `ponwrt-airoha-an7581-znxt_zn504xg-d-squashfs-sysupgrade.itb` | **系统平滑升级（推荐）**，保留全部配置 |
-| **兆能 ZN504XG-D** | `ponwrt-airoha-an7581-znxt_zn504xg-d-initramfs-recovery.itb` | **U-Boot Web 恢复/救砖** |
-| **烽火 HG5585F (CT 电信版)** | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-squashfs-sysupgrade.itb` | **系统平滑升级（推荐）**，标准 USB 2.0 硬件与 MT7916 Wi-Fi |
-| **烽火 HG5585F (CT 电信版)** | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-initramfs-recovery.itb` | **U-Boot Web 恢复/救砖** |
+| 兆能 ZN504XG-D | `ponwrt-airoha-an7581-znxt_zn504xg-d-` | `*-squashfs-sysupgrade.itb` 平滑升级（保留配置）；`*-initramfs-recovery.itb` U-Boot Web 恢复 |
+| 烽火 HG5382A | `ponwrt-airoha-an7581-fiberhome_hg5382a-` | 同上（plain 基线） |
+| 烽火 HG5585F 电信版 | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-` | 同上（USB + Wi-Fi + BT） |
+| 烽火 HG5585F 电信版（USB/SFP） | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | 同上（含 `kmod-phy-maxlinear`） |
+| 诺基亚 XG-040G-MD UBI | `ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-` | 同上（USB + BT） |
+
+版本标签规则 `v<日期>-<时间>-<label>-r<run>`：主线 `label=all`（五台）；WED / NPU 卸载实验分支 `label=wed`（两台 HG5585F，产物只留在 run 的 artifact，不写版本索引）。kmod 与独立软件包另发预发布：`kmods-all-r<run>`、`pkgs-extra-<device>-r<run>`。
+
+---
+
+## 🧩 独立软件包与 apk 仓库
+
+固件镜像只装「机型能力 + 基线」包，应用类软件一律以 apk 形式另发，装不装由用户决定：
+
+- **内核 kmod**：与固件同树同配置编译，发布在 `kmods-all-r<run>`（578 个 apk + `public-key.pem`），vermagic 与镜像一致。
+- **独立应用包**：`pkgs-extra-<device>-r<run>`，含 OpenClash、SQM 全套（`sqm-scripts` / `luci-app-sqm` / `luci-i18n-sqm-zh-cn` / `tc-tiny` / `nftables-json`）、`bash`、`ruby` + `ruby-yaml`、`unzip`、`honk` + `luci-app-honk` + `luci-i18n-honk-zh-cn`、passwall2 依赖链（`lyaml` / `libyaml` / `libuci-lua`）等。
+- **在线源**：`ufo1cn/ponwrt-apk-repo`，索引分支 `repo`（WED 实验分支 `repo-wed`），目录 `aarch64_cortex-a53/ponwrt-k<内核版本>/<common|usb|wifi|bt>/`；镜像首次启动按机型能力自动生成 `/etc/apk/repositories.d/90-ponwrt-apk-repo.list`。
+- **签名**：全仓库共用同一把固定私钥，公钥指纹 `d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed`，构建流与发布流都会断言。
+
+`honk` 与 `luci-app-honk` **不预装进任何机型镜像**（`honk` 走 tc-bpf，`bpftool` / `tar` 为「有就带」条件依赖，避免 kconfig 把整包隐藏），按需安装：
+
+```sh
+apk update
+apk add honk luci-app-honk
+```
 
 ---
 
@@ -444,7 +471,7 @@ sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_en
 
 ### 2. 克隆代码与更新 Feeds
 ```bash
-git clone https://github.com/wuziwei/ponwrt-ZN504.git
+git clone https://github.com/ufo1cn/ponwrt-ZN504-HG5585F.git
 cd ponwrt-ZN504
 
 ./scripts/feeds update -a
