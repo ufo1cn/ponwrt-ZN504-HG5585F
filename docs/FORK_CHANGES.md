@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | `fw-all.yml` | 统一固件入口：一次派发可选编哪些分支（`targets=all/mainline/wed`，默认 `all`=主线+WED）与哪些机型（`devices=all` 或 board 列表，按分支能力取交集）；wed 分支不再保留同名入口，编 WED 由该入口 `targets=wed` 完成 | `plan` job 解析出两条线的 `device_list` 再分别调 `fw-build.yml`：主线 `label=all`/`source_ref=master`/`repo`，WED `label=wed`/`source_ref=feat/wed-npu-offload-6.18`/`repo-wed`；交集为空的线自动跳过 |
 | `fw-build.yml` | 真正的编译体（内核 + kmod + 镜像 + kmod apk） | 按 `configs/devices/*.config` 装机型包；`apk_repo_branch` 决定镜像里的源分支；`source_ref` 指定 checkout 的 ref（留空=调用方本次 commit），因此 master 入口能编 WED 分支的树 |
-| `fw-publish.yml` | 把固件搬进 apk-repo 的 Release 并写 `meta/fw/<device>.json` | 供 `luci-app-ponwrt-update` 检查更新；`idx_branch=repo` 发主线五台（源 `master` / label `all`），`repo-wed` 发 WED 两台 HG5585F（默认源 `feat/wed-npu-offload-6.18` / label `wed`，可用 `src_branch` 覆盖）；两条发布流都允许从 `master` 直接触发 |
+| `fw-publish.yml` | 把固件搬进 apk-repo 的 Release 并写 `meta/fw/<device>.json` | 供 `luci-app-ponwrt-update` 检查更新；`idx_branch=repo` 发主线五台（源 `master` / label `all`），`repo-wed` 发 WED 两台 HG5585F（默认源 `feat/wed-npu-offload-6.18` / label `wed`，可用 `src_branch` 覆盖）；两条发布流都允许从 `master` 直接触发。源 run 归属校验：run 的 `head_branch` 等于约定分支，或该 run 里存在 `PonWrt-firmware-<label>-r<run_number>` 产物（统一入口在 master 上一次编两分支的场 景靠后者通过） |
 | `pkg-publish.yml` | 把三条包工作流的 apk + 固件流程的 kmod apk 归入 apk-repo 并重建签名索引 | `idx_branch` 选索引分支（`repo` 默认 label `all`、`repo-wed` 默认 label `wed`；`fw_labels` 可显式指定（如 `all,wed` 一次发两分支），偏离默认只告警不失败）；与 `fw-publish` 共用写锁 `apk-repo-write-<索引分支>` |
 | `build-packages-incremental.yml` / `-legacy` / `-extra` | 用户态包、旧板包、额外包 | 只编非 kmod 的用户态包，不含内核树步骤；kmod 全由 `fw-build` 编 |
 
