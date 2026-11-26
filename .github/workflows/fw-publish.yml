@@ -362,7 +362,7 @@ jobs:
             exit 1
           fi
           python3 - <<'PY' > rels.tsv
-          import json, sys
+          import json, os, sys
           for m in json.load(open('prepared.json', encoding='utf-8')):
               if m.get('unchanged'):
                   print('>>> 跳过 %s：镜像内容与已发布版本相同，不新建 Release' % m['device'], file=sys.stderr)
