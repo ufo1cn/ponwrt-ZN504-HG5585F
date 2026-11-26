@@ -56,3 +56,10 @@ package/feeds/packages/net/sqm-scripts|sqm-scripts|required
 # tc 是虚拟名，实际产物 tc-tiny；nftables 由 nftables-json 提供 —— 二者都在内核树内
 package/network/utils/iproute2|tc-tiny|required
 package/network/utils/nftables|nftables-json|required
+
+# ---- passwall2 的其余硬依赖补全（纯用户态，不碰内核源码树）
+# libuci-lua 是 uci 的 Lua 绑定子包，源码在树内 package/system/uci；lyaml / libyaml 由
+# 工作流的「Inject lyaml chain」步骤注入 package/lang/lyaml、package/libs/yaml。
+package/system/uci|libuci-lua|required
+package/lang/lyaml|lyaml|required
+package/libs/yaml|libyaml|required
