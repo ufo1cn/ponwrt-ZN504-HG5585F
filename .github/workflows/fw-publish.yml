@@ -367,7 +367,7 @@ jobs:
               if m.get('unchanged'):
                   print('>>> 跳过 %s：镜像内容与已发布版本相同，不新建 Release' % m['device'], file=sys.stderr)
                   continue
-              tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
+              tag = 'fw-%s%s-r%s-%s' % (m['device'], '' if m['label'] == 'all' else '-' + m['label'], m['run'], m['commit'][:7])
               print('\t'.join([m['device'], tag, m['name'], m['dir']]))
           PY
           if [ ! -s rels.tsv ]; then
@@ -406,7 +406,7 @@ jobs:
               if m.get('unchanged'):
                   print('索引保留（内容未变）->', m['device'])
                   continue
-              tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
+              tag = 'fw-%s%s-r%s-%s' % (m['device'], '' if m['label'] == 'all' else '-' + m['label'], m['run'], m['commit'][:7])
               url = 'https://github.com/%s/releases/download/%s/%s' % (dst, tag, m['name'])
               d = {
                   'schema': 1,
@@ -463,7 +463,7 @@ jobs:
           import json, os
           if os.path.isfile('prepared.json'):
               for m in json.load(open('prepared.json', encoding='utf-8')):
-                  tag = 'fw-%s-r%s-%s' % (m['device'], m['run'], m['commit'][:7])
+                  tag = 'fw-%s%s-r%s-%s' % (m['device'], '' if m['label'] == 'all' else '-' + m['label'], m['run'], m['commit'][:7])
                   print('| %s | %s | %s | %s | %.2f MiB | %s | %s |' % (
                       m['label'], m['run'], tag, m['name'], m['size'] / 1048576.0,
                       '内容未变，跳过' if m.get('unchanged') else '已更新',
