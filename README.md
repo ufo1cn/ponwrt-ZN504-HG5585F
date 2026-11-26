@@ -1,4 +1,4 @@
-# PonWrt 6.18 for 兆能 ZN504XG-D & 烽火 HG5585F (Airoha AN7581)
+# PonWrt 6.18 for 五款 Airoha AN7581 光猫（ZN504XG-D / HG5585F CT / HG5585F CT-USB-SFP / HG5382A / Nokia XG-040G-MD）
 
 简体中文 | [English](README_en.md)
 
@@ -39,7 +39,7 @@
 | **双栈硬件流卸载 (PPE)** | ⚠️ 常见固件缺少网桥卸载补丁导致下行卸载率仅 17%；IPv6 PPPoE 严重丢包卡死，迫使用户关闭加速 | ✅ **独家补丁 931/932 修复 AN7581 PPE 缺陷与网桥从端口卸载**：实现 IPv4+IPv6 双栈 100% 直转，**千兆满速 CPU 仅 ~4%，下行硬件卸载率飙升至 90%+** |
 | **纯净硬件加解密优化** | ⚠️ 保留 SafeXcel / EIP-93 协处理器驱动，诱发 Crypto API 优先级霸凌、DMA 性能倒挂与锁争用 | ✅ **彻底剔除 `kmod-crypto-hw-eip93` 负优化**，释放 4 核 1.2GHz ARMv8 NEON 向量直算，**小包 DMA 刷脏归零，WireGuard/Sing-Box 吞吐更稳** |
 | **Sing-Box 原生 NFQUEUE & Honk eBPF** | ❌ 缺 `kmod-nft-queue` / `kmod-veth` 驱动，开透明代理必崩；靠易冲突的自定义脚本 | ✅ **镜像内置 `kmod-veth` / `kmod-sched-bpf` / `kmod-nf-conntrack`，`sing-box 1.15.0-alpha.13` 直接编进镜像**；NFQUEUE 两个 kmod（`kmod-nft-queue` / `kmod-nfnetlink-queue`）与 `honk 0.1.0-beta.6`（`honk` + `luci-app-honk` + 中文 i18n，`honk-core` 由 `honk-install` 运行时装）都以**独立 apk** 交付，**原生 TUN 与 eBPF 双路透明网关按需启用** |
-| **现代化 CI/CD 流水线** | ⚠️ 基础单任务无编译器指纹匹配，依赖易超时，编译动辄 2~4 小时且网络波动易断流 | ✅ **Ubuntu 24.04 + Node 24 + CCACHE 编译器指纹匹配**，5GB 增量编译缓存与多镜像测速回退，**构建大幅缩短至 20~35 分钟，成功率 99%+** |
+| **现代化 CI/CD 流水线** | ⚠️ 基础单任务无编译器指纹匹配，依赖易超时，编译动辄 2~4 小时且网络波动易断流 | ✅ **Ubuntu 24.04 + CCACHE 编译器指纹匹配**，5GB 增量编译缓存与多镜像测速回退，**构建大幅缩短至 20~35 分钟，成功率 99%+** |
 
 ---
 
@@ -220,7 +220,7 @@
 
 ## 📦 固件下载 (Releases)
 
-请前往 [GitHub Releases](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases) 获取实机验收过的固件。一次 `fw-all` 构建产出**五台机型**的产物，每个 Release 共 32 个资产：10 个镜像（5 台 × `squashfs-sysupgrade` + `initramfs-recovery`）、对应 10 个 `.sha256`、4 个 `manifest-*.json`、`config-all.txt`、`build-info.txt`。
+请前往 [GitHub Releases](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases) 获取实机验收过的固件。一次 `fw-all` 构建产出**五台机型**的产物，每个 Release 共 32 个资产：10 个镜像（5 台 × `squashfs-sysupgrade` + `initramfs-recovery`）及其 10 个 `.sha256`、4 份 `manifest-*.json` 及其 4 个 `.sha256`（`ct` 与 `ct-usb-sfp` 共用一份 manifest）、`config-all.txt` 与 `build-info.txt` 各带一个 `.sha256`。
 
 | 机型 | 镜像名前缀 | 适用场景 |
 | :--- | :--- | :--- |
@@ -230,7 +230,7 @@
 | 烽火 HG5585F 电信版（USB/SFP） | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | 同上（含 `kmod-phy-maxlinear`） |
 | 诺基亚 XG-040G-MD UBI | `ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-` | 同上（USB + BT） |
 
-版本标签规则 `v<日期>-<时间>-<label>-r<run>`：主线 `label=all`（五台）；WED / NPU 卸载实验分支 `label=wed`（两台 HG5585F，产物只留在 run 的 artifact，不写版本索引）。kmod 与独立软件包另发预发布：`kmods-all-r<run>`、`pkgs-extra-<device>-r<run>`。
+版本标签规则 `v<日期>-<时间>-<label>-r<run>`：`master` 只有一个固件入口 `fw-all.yml`，写死 `label=all`（五台）。WED / NPU 硬件卸载只在 `feat/wed-npu-offload-6.18` 分支：它自带 `label=wed`（两台 HG5585F），产物同样发 Release（`v<日期>-<时间>-wed-r<run>`）与 `kmods-wed-r<run>`，其 kmod 只能进 `repo-wed`。kmod 与独立软件包另发预发布：`kmods-all-r<run>`、`pkgs-extra-<device>-r<run>`。
 
 ---
 
@@ -239,8 +239,9 @@
 固件镜像只装「机型能力 + 基线」包，应用类软件一律以 apk 形式另发，装不装由用户决定：
 
 - **内核 kmod**：与固件同树同配置编译，发布在 `kmods-all-r<run>`（578 个 apk + `public-key.pem`），vermagic 与镜像一致。
+- **kmod 生命周期**：kmod 的 `kernel=<内核版本>~<内核 config 指纹>-r<rev>` 与固件内核 config 绑定。`pkg-publish` 收到 `groups=kmods`（或 `all`）时，先删掉仓库 `ponwrt-k<内核版本>/` 下该批的全部旧 `kmod-*.apk` 再写入本次产物，索引按仓库真实存在的目录重建——所以换了内核 config 后不适用的旧 kmod 不会残留在软件仓（固件 Release 里的 `kmods-*-r<run>` 归档不受影响，可回溯）。
 - **独立应用包**：`pkgs-extra-<device>-r<run>`，含 OpenClash、SQM 全套（`sqm-scripts` / `luci-app-sqm` / `luci-i18n-sqm-zh-cn` / `tc-tiny` / `nftables-json`）、`bash`、`ruby` + `ruby-yaml`、`unzip`、`honk` + `luci-app-honk` + `luci-i18n-honk-zh-cn`、passwall2 依赖链（`lyaml` / `libyaml` / `libuci-lua`）等。
-- **在线源**：`ufo1cn/ponwrt-apk-repo`，索引分支 `repo`（WED 实验分支 `repo-wed`），目录 `aarch64_cortex-a53/ponwrt-k<内核版本>/<common|usb|wifi|bt>/`；镜像首次启动按机型能力自动生成 `/etc/apk/repositories.d/90-ponwrt-apk-repo.list`。
+- **在线源**：`ufo1cn/ponwrt-apk-repo`，索引分支 `repo`（主线五台，只收 `label=all` 产物）；WED 分支固件用 `repo-wed`（只收 `label=wed` 的固件与 kmod，`pkg-publish` 会硬校验 label，写错直接失败）。目录 `aarch64_cortex-a53/ponwrt-k<内核版本>/<common|usb|wifi|bt>/`；镜像首次启动按机型能力自动生成 `/etc/apk/repositories.d/90-ponwrt-apk-repo.list`。
 - **签名**：全仓库共用同一把固定私钥，公钥指纹 `d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed`，构建流与发布流都会断言。
 
 `honk` 与 `luci-app-honk` **不预装进任何机型镜像**（`honk` 走 tc-bpf，`bpftool` / `tar` 为「有就带」条件依赖，避免 kconfig 把整包隐藏），按需安装：

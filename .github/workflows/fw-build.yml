@@ -665,7 +665,7 @@ jobs:
           echo ">>> 预计算内核版本 KVER=$KVER"
           echo "KVER=$KVER" >> "$GITHUB_ENV"
           RAW="https://raw.githubusercontent.com/ufo1cn/ponwrt-apk-repo/${{ inputs.apk_repo_branch }}/aarch64_cortex-a53/ponwrt-k${KVER}"
-          # 国内只读镜像（Gitee）：由 apk-repo 的定时工作流在索引重建后自动同步，
+          # 国内只读镜像（Gitee）：本仓不带自动同步工作流，需外部手工把分支快照推到 Gitee，
           # 内容与 GitHub 分支一致、同一把私钥签名。用仓库变量 APK_GITEE_BASE 配置，
           # 形如 https://gitee.com/ufo1cn/ponwrt-apk-repo/raw（留空 = 不加镜像源）。
           MIRROR=""

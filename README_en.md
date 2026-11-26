@@ -1,4 +1,4 @@
-# PonWrt 6.18 for ZN504XG-D & HG5585F (Airoha AN7581)
+# PonWrt 6.18 for five Airoha AN7581 PON devices (ZN504XG-D / HG5585F CT / HG5585F CT-USB-SFP / HG5382A / Nokia XG-040G-MD)
 
 [简体中文](README.md) | English
 
@@ -39,7 +39,7 @@ The table below details the technical generational gap between our enhanced PonW
 | **Dual-Stack Hardware Offload (PPE)** | ⚠️ Missing bridge offload patch leaves downlink offload at 17%; IPv6 PPPoE drops packets forcing users to disable HW acceleration | ✅ **Exclusive Patches 931/932 fix AN7581 PPE & bridge slave offload**: IPv4+IPv6 dual-stack 100% hardware direct routing, **gigabit wire-speed CPU ~4%, downlink offload rate up to 90%+** |
 | **Pure Cryptographic Pipeline** | ⚠️ Retains SafeXcel / EIP-93 coprocessor, causing Crypto API priority inversion and DMA penalties | ✅ **Completely eliminated `kmod-crypto-hw-eip93`**, unleashing 4-core 1.2GHz ARMv8 NEON vector compute, **WireGuard/Sing-Box lower jitter & higher throughput** |
 | **Sing-Box Native NFQUEUE & Honk eBPF** | ❌ Missing `kmod-nft-queue` / `kmod-veth`, transparent proxy crashes; relies on fragile scripts | ✅ **Images ship `kmod-veth` / `kmod-sched-bpf` / `kmod-nf-conntrack`, with sing-box `1.15.0-alpha.13` baked in**; the two NFQUEUE kmods (`kmod-nft-queue` / `kmod-nfnetlink-queue`) and `honk 0.1.0-beta.6` (`honk` + `luci-app-honk` + zh-CN i18n, `honk-core` fetched at runtime by `honk-install`) are delivered as **standalone apks**, **native TUN and eBPF gateways on demand** |
-| **Modern CI/CD Pipeline** | ⚠️ Single runner without compiler fingerprint matching, build takes 2~4 hours with frequent APT timeouts | ✅ **Ubuntu 24.04 + Node 24 + CCACHE compiler fingerprinting**, 5GB incremental cache, **build time slashed to 20~35 minutes with 99%+ reliability** |
+| **Modern CI/CD Pipeline** | ⚠️ Single runner without compiler fingerprint matching, build takes 2~4 hours with frequent APT timeouts | ✅ **Ubuntu 24.04 + CCACHE compiler fingerprinting**, 5GB incremental cache, **build time slashed to 20~35 minutes with 99%+ reliability** |
 
 ---
 
@@ -217,7 +217,7 @@ When both ports and the STB LAN port are bridged into a single bridge (`br-iptv`
 
 ## 📦 Firmware Downloads (Releases)
 
-Download field-tested images from [GitHub Releases](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases). Each `fw-all` release carries **32 assets** for five devices: 10 images (5 × `squashfs-sysupgrade` + `initramfs-recovery`), 10 `.sha256`, 4 `manifest-*.json`, `config-all.txt` and `build-info.txt`.
+Download field-tested images from [GitHub Releases](https://github.com/ufo1cn/ponwrt-ZN504-HG5585F/releases). Each `fw-all` release carries **32 assets** for five devices: 10 images (5 × `squashfs-sysupgrade` + `initramfs-recovery`) with their 10 `.sha256`, 4 `manifest-*.json` with their 4 `.sha256` (`ct` and `ct-usb-sfp` share one manifest), plus `config-all.txt` and `build-info.txt` each with a `.sha256`.
 
 | Device | Image prefix | Usage |
 | :--- | :--- | :--- |
@@ -227,7 +227,7 @@ Download field-tested images from [GitHub Releases](https://github.com/ufo1cn/po
 | FiberHome HG5585F CT (USB/SFP) | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | same (+ `kmod-phy-maxlinear`) |
 | Nokia XG-040G-MD UBI | `ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-` | same (USB + BT) |
 
-Tag scheme `v<date>-<time>-<label>-r<run>`: `label=all` for the five mainline devices, `label=wed` for the WED/NPU-offload experiment (two HG5585F images, artifacts only, no version index). Kernel modules and standalone apps are published as prereleases `kmods-all-r<run>` and `pkgs-extra-<device>-r<run>`.
+Tag scheme `v<date>-<time>-<label>-r<run>`: on `master` there is a single firmware entry `fw-all.yml` hard-wired to `label=all` (five devices). WED/NPU hardware offload lives only on branch `feat/wed-npu-offload-6.18`, which sets `label=wed` (two HG5585F images) and still publishes releases (`v<date>-<time>-wed-r<run>`) and `kmods-wed-r<run>`; its kmods may only be published into `repo-wed`. Kernel modules and standalone apps are published as prereleases `kmods-all-r<run>` and `pkgs-extra-<device>-r<run>`.
 
 ---
 
@@ -236,8 +236,9 @@ Tag scheme `v<date>-<time>-<label>-r<run>`: `label=all` for the five mainline de
 Images only carry "device caps + baseline" packages; applications ship as apks and stay optional:
 
 - **Kernel modules**: built in the same tree/config as the firmware, published in `kmods-all-r<run>` (578 apks + `public-key.pem`), vermagic matches the images.
+- **kmod lifecycle**: a kmod's `kernel=<kver>~<kernel-config-fingerprint>-r<rev>` dependency is bound to the firmware kernel config. On `groups=kmods` (or `all`), `pkg-publish` first deletes every old `kmod-*.apk` under `ponwrt-k<kver>/` in that branch and then writes this batch, rebuilding the index from directories that actually exist. So stale kmods from an older kernel config never linger in the feed (the `kmods-*-r<run>` release archives stay available for rollback).
 - **Standalone apps**: `pkgs-extra-<device>-r<run>` — OpenClash, SQM suite, `bash`, `ruby` + `ruby-yaml`, `unzip`, `honk` + `luci-app-honk` + zh-CN i18n, passwall2 dependency chain (`lyaml` / `libyaml` / `libuci-lua`) and more.
-- **Online feed**: `ufo1cn/ponwrt-apk-repo`, index branch `repo` (`repo-wed` for WED experiments), layout `aarch64_cortex-a53/ponwrt-k<kver>/<common|usb|wifi|bt>/`. On first boot the image generates `/etc/apk/repositories.d/90-ponwrt-apk-repo.list` from the device capability table.
+- **Online feed**: `ufo1cn/ponwrt-apk-repo`, index branch `repo` (mainline five devices, accepts `label=all` builds only); WED-branch firmware uses `repo-wed` (accepts `label=wed` firmware and kmods only — `pkg-publish` hard-fails on a mismatched label). Layout `aarch64_cortex-a53/ponwrt-k<kver>/<common|usb|wifi|bt>/`. On first boot the image generates `/etc/apk/repositories.d/90-ponwrt-apk-repo.list` from the device capability table.
 - **Signing**: one fixed private key for the whole repo, public-key fingerprint `d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed`, asserted by both build and publish workflows.
 
 `honk` and `luci-app-honk` are **not preinstalled in any image** (`bpftool` / `tar` are "include-if-present" dependencies so kconfig cannot hide the package); install on demand:

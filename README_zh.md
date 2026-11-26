@@ -1,8 +1,8 @@
-# PonWrt
+# PonWrt 6.18（Airoha AN7581 五机型分支）
 
 [English](README_en.md) | 简体中文
 
-PonWrt 基于 [ImmortalWrt](https://github.com/immortalwrt/immortalwrt)，增加了对 Airoha AN7581 和 AN7583 PON 设备的支持。
+本仓是 [`pbs05/ponwrt`](https://github.com/pbs05/ponwrt) 的 fork，只出 **AN7581 五机型**（见下方口径说明）；AN7583 与其余上游设备支持保留在上游，本仓不编。上游本身基于 [ImmortalWrt](https://github.com/immortalwrt/immortalwrt)。
 
 > 本仓（`ufo1cn/ponwrt-ZN504-HG5585F`）的实际发布口径见 [README.md](README.md)：一次 `fw-all` 构建编五台机型
 > （`znxt_zn504xg-d` / `fiberhome_hg5382a` / `fiberhome_hg5585f-ct` / `fiberhome_hg5585f-ct-usb-sfp` / `nokia_xg-040g-md-ubi`），
@@ -54,17 +54,15 @@ sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bis
 sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
 
 #  拉取源码
-git clone https://github.com/pbs05/ponwrt.git
-cd ponwrt
+git clone https://github.com/ufo1cn/ponwrt-ZN504-HG5585F.git
+cd ponwrt-ZN504-HG5585F
 
 #  更新并安装 feeds（软件包源）
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 
-#  选择配置 以目标7581为例
-cp configs/an7581.config .config
-#  若目标是 AN7583，改用下面这行：
-cp configs/an7583.config .config
+#  选择配置（本仓只有 AN7581）：两份配置用 kconfig.pl 合并
+./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
 
 
 #  开始编译

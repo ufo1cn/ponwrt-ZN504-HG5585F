@@ -16,7 +16,7 @@
 | `fw-all.yml` | 唯一固件入口，一次 `make` 编五台机型 | 调 `fw-build.yml`，`label=all` |
 | `fw-build.yml` | 真正的编译体（内核 + kmod + 镜像 + kmod apk） | 按 `configs/devices/*.config` 装机型包；`apk_repo_branch` 决定镜像里的源分支 |
 | `fw-publish.yml` | 把固件搬进 apk-repo 的 Release 并写 `meta/fw/<device>.json` | 供 `luci-app-ponwrt-update` 检查更新；`idx_branch=repo` 发主线五台（源 `master` / label `all`），`repo-wed` 发 WED 两台 HG5585F（源 `feat/wed-npu-offload-6.18` / label `wed`） |
-| `pkg-publish.yml` | 把三条包工作流的 apk + 固件流程的 kmod apk 归入 apk-repo 并重建签名索引 | `idx_branch` 选索引分支（`repo` 只收 label `all`、`repo-wed` 只收 label `wed`，写错直接失败）；与 `fw-publish` / reindex 共用写锁 `apk-repo-write-<索引分支>` |
+| `pkg-publish.yml` | 把三条包工作流的 apk + 固件流程的 kmod apk 归入 apk-repo 并重建签名索引 | `idx_branch` 选索引分支（`repo` 只收 label `all`、`repo-wed` 只收 label `wed`，写错直接失败）；与 `fw-publish` 共用写锁 `apk-repo-write-<索引分支>` |
 | `build-packages-incremental.yml` / `-legacy` / `-extra` | 用户态包、旧板包、额外包 | 只编非 kmod 的用户态包，不含内核树步骤；kmod 全由 `fw-build` 编 |
 
 已删除、不得复活：`fw-usb-wifi.yml`、`fw-usb.yml`、`fw-plain.yml`、`configs/device-features.txt`、`build-firmware-manual.yml`。`PonWrt1.yml`（run 391191043）永不修改。
@@ -84,11 +84,11 @@
 - `pkg-publish.yml` 的 `idx_branch` 决定写哪个索引分支；`repo-wed` 从 `repo` 拉出，专供 WED 分支固件，避免实验 kmod 混进主线。
 - 签名：全仓库只用同一把 `APK_SIGNING_PRIVATE_KEY`，公钥指纹 `d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed`；`fw-build` 与 `pkg-publish` 都会断言。
 
-- 写 apk-repo 的三条流（`fw-publish.yml`、`pkg-publish.yml`、apk-repo 的 `reindex-apk-repo.yml`）共用同一把写锁 `apk-repo-write-<索引分支>`（`cancel-in-progress: false`）。三者都往同一分支 commit，串行排队比各自 rebase 撞运气可靠；写不同分支（`repo` / `repo-wed`）互不阻塞。
-- `reindex-apk-repo.yml` 只作兜底：matrix 跑 `repo` 与 `repo-wed` 两条分支，每 2 小时一次（原 `*/10` 已降频）。正常入库由 `pkg-publish` 自己重签索引，reindex 负责修「手工塞进仓的包 / 发布中断留下的索引漂移」并补签；某分支还没有任何包时只告警跳过，不报错。
+- 写 apk-repo 的两条流（本仓 `fw-publish.yml`、`pkg-publish.yml`）共用同一把写锁 `apk-repo-write-<索引分支>`（`cancel-in-progress: false`）。两者都往同一分支 commit，串行排队比各自 rebase 撞运气可靠；写不同分支（`repo` / `repo-wed`）互不阻塞。
+- 索引由 `pkg-publish` 自己重签（按仓库真实存在的目录重建，空目录删索引）。历史上 apk-repo 里的 `reindex-apk-repo.yml` 定时兜底流已移除，本仓不再依赖它；手工塞包或发布中断留下的索引漂移，需要重跑一次 `pkg-publish --groups all` 或手工重建。
 - kmods 分组：`pkg-publish --groups kmods` 直接取固件 artifact 的 `kmods/`，按 `configs/pon-feature-packages.txt` 归类到 common/usb/wifi/bt，所以从更新页装包时 kmod 依赖不再“取不到”。
 
-- Gitee 只读镜像：`reindex-apk-repo.yml` 每 2 小时重建索引后，把 `repo` / `repo-wed` 各做一份**单提交快照**强推到 Gitee（内容变了才推，用 `.snapshot-id` 比对；未配 `secrets.GITEE_USER` / `GITEE_TOKEN` 与变量 `GITEE_REPO` 时只告警跳过）。Gitee 侧分支永远只有 1 个 commit，体积 ≈ 当前文件量，不会因历史累积撞上 500MB 上限；GitHub 仍是唯一写入源。
+- Gitee 只读镜像：本仓**没有**自动推 Gitee 的工作流（原先放在 apk-repo 的 `reindex-apk-repo.yml`，已随该流移除）。`vars.APK_GITEE_BASE` 只是「消费端」：外部手工同步出一份 Gitee 快照后，镜像才会追加这组源。GitHub 仍是唯一写入源。
 - 固件双源：设置仓库变量 `APK_GITEE_BASE`（如 `https://gitee.com/<owner>/ponwrt-apk-repo/raw`）后，镜像内 `/etc/ponwrt-repo-mirror.txt` 记录 Gitee 前缀，`96-ponwrt-apk-repos` 在能力源之后追加同一组 Gitee 源（同内容、同一把私钥签名；`apk` 按版本取最高那份）。变量留空时镜像里只有 GitHub 源，行为与之前一致。
 
 ## 九、软件包（不进镜像）
