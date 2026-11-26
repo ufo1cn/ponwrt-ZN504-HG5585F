@@ -450,6 +450,55 @@ jobs:
             [ "$i" = 3 ] && { echo "::error::索引推送三次都失败"; exit 1; }
           done
 
+      # 保留策略：apk-repo 里每机型每线只留最新 2 个固件 Release；
+      # 固件仓里 kmods-<label>/v<时间戳>-<label> 各只留最新 1 个。
+      # 只按本仓自己的命名族回删，绝不碰 meta 指向的最新版；dry-run 不删。
+      - name: Prune old releases
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
+          DST_REPO: ufo1cn/ponwrt-apk-repo
+          SRC_REPO: ${{ github.repository }}
+          KEEP_PER_DEVICE: '2'
+        run: |
+          set -euo pipefail
+          prune_repo() {
+            repo="$1"; kind="$2"
+            gh api --paginate "repos/$repo/releases?per_page=100" \
+              --jq '[.[] | {id,tag_name,created_at}] | sort_by(.created_at) | reverse' > "rels-$kind.json"
+            KIND="$kind" REPO="$repo" python3 - <<'PY'
+          import json, os, re, subprocess
+          kind = os.environ['KIND']; repo = os.environ['REPO']
+          keep_dev = int(os.environ.get('KEEP_PER_DEVICE', '2'))
+          rels = json.load(open('rels-%s.json' % kind, encoding='utf-8'))
+          def family(tag):
+              if kind == 'fw':
+                  m = re.match(r'^fw-(.+?)(-wed)?-r\d+-[0-9a-f]{7}$', tag)
+                  if m: return ('fw', m.group(1) + (m.group(2) or ''))
+              else:
+                  m = re.match(r'^(kmods-[a-z]+)-r\d+$', tag)
+                  if m: return ('kmods', m.group(1))
+                  m = re.match(r'^v[0-9][0-9a-z.\-]*-(all|wed)-r\d+$', tag)
+                  if m: return ('fwrel', m.group(1))
+              return None
+          seen, dele = {}, []
+          for r in rels:
+              f = family(r['tag_name'])
+              if not f: continue
+              seen[f] = seen.get(f, 0) + 1
+              limit = 1 if kind != 'fw' else keep_dev
+              if seen[f] > limit:
+                  dele.append(r)
+          for r in dele:
+              print('prune %s %s' % (repo, r['tag_name']))
+              subprocess.run(['gh','api','-X','DELETE','repos/%s/releases/%s' % (repo, r['id'])], check=False)
+              subprocess.run(['gh','api','-X','DELETE','repos/%s/git/refs/tags/%s' % (repo, r['tag_name'])], check=False)
+          print('pruned %d in %s' % (len(dele), repo))
+          PY
+          }
+          prune_repo "$DST_REPO" fw
+          prune_repo "$SRC_REPO" other
+
       - name: Summary
         if: always()
         run: |
