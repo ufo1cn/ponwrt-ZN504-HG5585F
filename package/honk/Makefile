@@ -30,12 +30,21 @@ define Package/honk
   # honk 本体走 tc-bpf，不依赖 nfqueue；nft-queue/nfnetlink-queue 改成「有就带」的条件依赖，
   # 否则内核里 NETFILTER_NETLINK_QUEUE 未开时整个 honk 会被 kconfig 隐藏，
   # 镜像阶段 apk add 报「honk (no such package)」（run 45604633144）。
+  #
+  # bpftool / tar 同样不能写成硬依赖（r38/r41 就是这么整包消失的）：
+  #   · 树里 bpftool 只有 bpftool-minimal / bpftool-full 两个真实符号，`bpftool` 只是
+  #     PROVIDES 虚拟名，+bpftool 在 kconfig 里指向 PACKAGE_bpftool，两个变体都没开时
+  #     该符号不可满足 → honk 与 luci-app-honk 连 `# ... is not set` 行都不生成（查无此包）；
+  #   · tar 在本次构建的包索引里根本没有符号（镜像里用 busybox 的 tar applet 即可，
+  #     honk-install 只调 `tar -xzf`）。
+  # 两者都改成「有就带」：依赖满足才挂上，不满足也不再拖累整包可见性。
   DEPENDS:=@(aarch64||x86_64) +kmod-veth +kmod-sched-core +kmod-sched-bpf \
            +kmod-nft-core \
            +PACKAGE_kmod-nft-queue:kmod-nft-queue +PACKAGE_kmod-nfnetlink-queue:kmod-nfnetlink-queue \
-           +kmod-nf-conntrack +bpftool +ip-full \
+           +kmod-nf-conntrack +ip-full \
+           +PACKAGE_bpftool-minimal:bpftool-minimal +PACKAGE_tar:tar \
            +PACKAGE_v2ray-geoip:v2ray-geoip +PACKAGE_v2ray-geosite:v2ray-geosite \
-           +curl +tar +ca-bundle
+           +curl +ca-bundle
 endef
 
 define Package/honk/description

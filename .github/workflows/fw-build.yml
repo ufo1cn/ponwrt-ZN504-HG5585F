@@ -1396,7 +1396,7 @@ jobs:
             - 装什么包只由 `configs/devices/<board>.config` 决定（`DEVICE_CAPS` / `DEVICE_PREINSTALL`），一次构建内按机型装包
             - 配置来源：`configs/an7581.config` + `configs/release.config`（不合并自有应用清单，应用走包工作流）
             - 内核能力：`target/linux/airoha/an7581/config-6.18` + `patches-6.18`（含 9xx 板级、GDM3/4、flowtable 卸载）
-            - 透明代理：`honk` + `luci-app-honk` 已预装（honk-core 由 `honk-install` 运行时按需装）
+            - 透明代理：`honk` + `luci-app-honk` 只以独立 apk 形式交付（随 kmods 预发布，不进镜像；honk-core 由 `honk-install` 运行时按需装）
             - 内存：`kmod-zram` + `zram-swap` 已预装，首次启动即建压缩交换区（`system.zram_size_mb`），`vm.swappiness=20` 由 `rc.local` 收紧
             - 全锥 NAT：内核 + `libnftnl` / `nftables` / `firewall4` 补丁已合入镜像，默认未启用（`firewall.@defaults[0].fullcone` 未置 1）
             - 运行时调优：`sysctl.d`（4MB 缓冲 / BBR+fq / conntrack）、`98-pppoe-rps`、`rc.local`（txqueuelen、IRQ 分核、PPE bind_rate、airoha-pond OOM 守卫）
