@@ -56,6 +56,11 @@ on:
         required: false
         default: 'repo'
         type: string
+      source_ref:
+        description: '源码树 ref（留空=调用方这次运行的 commit）。允许在 master 上的入口去编别的分支的树（WED 补丁只在 feat/wed-npu-offload-6.18）'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   # 按机型类别隔离：usb-wifi / usb / plain 三条互不打断；只有同类别重复运行才取消
@@ -82,6 +87,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # source_ref 为空时退回本次运行的 commit；非空时编指定分支的树
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - name: Load per-device definitions (configs/devices/*.config)
         run: |

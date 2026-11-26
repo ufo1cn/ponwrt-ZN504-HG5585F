@@ -1,7 +1,8 @@
 name: PonWrt 固件构建（全机型）
 
 # ==============================================================================
-# 一个入口、一次构建、三台机型：usb-wifi / usb / plain。
+# 一个入口：一次派发同时编主线（五台）与 WED（两台），也可只编其中一条。
+# targets=all 主线+WED（默认）/ mainline 仅主线 / wed 仅 WED；devices=all 或 board 列表。
 #
 # 沿用上游 build-zn504.yml 的做法：一次 make 里同时选中多个 DEVICE，内核与全部
 # kmod 只编一遍（所有 kmod 一律 =m，只出 apk、不进镜像），最后由各机型的
@@ -16,6 +17,20 @@ name: PonWrt 固件构建（全机型）
 on:
   workflow_dispatch:
     inputs:
+      targets:
+        description: '编哪些分支：all=主线+WED（默认全编）、mainline=仅主线五台、wed=仅 WED 两台'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'mainline'
+          - 'wed'
+      devices:
+        description: '编哪些机型：all=全部（按分支能力自动取交集），也可空格/逗号分隔指定 board'
+        required: true
+        default: 'all'
+        type: string
       cache_mode:
         description: '编译缓存模式'
         required: true
@@ -39,11 +54,76 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # 选型：把「分支类别」和「机型」解析成两条构建线各自的 device_list。
+  #   · 主线（label=all）：五台机型，源码树 = master
+  #   · WED（label=wed）：只有 HG5585F CT / CT-USB-SFP（WED/NPU 补丁与 dtsi 只覆盖这两台），
+  #     源码树 = feat/wed-npu-offload-6.18，由 fw-build 的 source_ref 指定
+  # 指定机型时按各分支能力取交集；某条线交集为空就跳过该 job（不失败）。
+  # ---------------------------------------------------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      main: ${{ steps.p.outputs.main }}
+      wed: ${{ steps.p.outputs.wed }}
+    steps:
+      - id: p
+        env:
+          TARGETS: ${{ inputs.targets }}
+          DEVICES: ${{ inputs.devices }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          MAIN_ALL = ['fiberhome_hg5585f-ct', 'fiberhome_hg5585f-ct-usb-sfp',
+                      'nokia_xg-040g-md-ubi', 'znxt_zn504xg-d', 'fiberhome_hg5382a']
+          # WED/NPU 补丁与 dtsi 只覆盖 HG5585F 两台
+          WED_ALL = ['fiberhome_hg5585f-ct', 'fiberhome_hg5585f-ct-usb-sfp']
+          targets = (os.environ.get('TARGETS') or 'all').strip()
+          raw = (os.environ.get('DEVICES') or 'all').strip()
+          want = [] if raw == '' or raw.lower() == 'all' else [x for x in re.split(r'[,;\s]+', raw) if x]
+          unknown = [d for d in want if d not in MAIN_ALL]
+          if unknown:
+              print('::error::未知机型 %s（可选：%s）' % (','.join(unknown), ' '.join(MAIN_ALL)), file=sys.stderr)
+              sys.exit(1)
+          def pick(allowed):
+              return allowed if not want else [d for d in allowed if d in want]
+          main = pick(MAIN_ALL) if targets in ('all', 'mainline') else []
+          wed = pick(WED_ALL) if targets in ('all', 'wed') else []
+          if targets not in ('all', 'mainline', 'wed'):
+              print('::error::targets 只接受 all / mainline / wed，收到：%s' % targets, file=sys.stderr)
+              sys.exit(1)
+          if not main and not wed:
+              print('::error::按当前选择两条线都为空：targets=%s devices=%s' % (targets, raw), file=sys.stderr)
+              sys.exit(1)
+          print('>>> 主线 device_list：%s' % (' '.join(main) or '<跳过>'))
+          print('>>> WED  device_list：%s' % (' '.join(wed) or '<跳过>'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('main=%s\n' % ' '.join(main))
+              f.write('wed=%s\n' % ' '.join(wed))
+          PY
+
+  build-main:
+    needs: plan
+    if: needs.plan.outputs.main != ''
     uses: ./.github/workflows/fw-build.yml
     with:
       label: 'all'
-      device_list: 'fiberhome_hg5585f-ct fiberhome_hg5585f-ct-usb-sfp nokia_xg-040g-md-ubi znxt_zn504xg-d fiberhome_hg5382a'
+      device_list: ${{ needs.plan.outputs.main }}
+      apk_repo_branch: 'repo'
+      source_ref: 'master'
+      upload_release: ${{ inputs.upload_release }}
+      cache_mode: ${{ inputs.cache_mode }}
+    secrets: inherit
+
+  build-wed:
+    needs: plan
+    if: needs.plan.outputs.wed != ''
+    uses: ./.github/workflows/fw-build.yml
+    with:
+      label: 'wed'
+      device_list: ${{ needs.plan.outputs.wed }}
+      apk_repo_branch: 'repo-wed'
+      source_ref: 'feat/wed-npu-offload-6.18'
       upload_release: ${{ inputs.upload_release }}
       cache_mode: ${{ inputs.cache_mode }}
     secrets: inherit

@@ -230,7 +230,7 @@
 | 烽火 HG5585F 电信版（USB/SFP） | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | 同上（含 `usb_pcs`；`kmod-phy-maxlinear` 五机型默认装） |
 | 诺基亚 XG-040G-MD UBI | `ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-` | 同上（USB + BT） |
 
-版本标签规则 `v<日期>-<时间>-<label>-r<run>`：`master` 只有一个固件入口 `fw-all.yml`，写死 `label=all`（五台）。WED / NPU 硬件卸载只在 `feat/wed-npu-offload-6.18` 分支：它自带 `label=wed`（两台 HG5585F），产物同样发 Release（`v<日期>-<时间>-wed-r<run>`）与 `kmods-wed-r<run>`，其 kmod 只能进 `repo-wed`。kmod 与独立软件包另发预发布：`kmods-all-r<run>`、`pkgs-extra-<device>-r<run>`。
+版本标签规则 `v<日期>-<时间>-<label>-r<run>`。固件入口统一在 master 的 `fw-all.yml`，派发时可选 `targets`（`all`=主线+WED，默认；`mainline`=仅主线五台；`wed`=仅 WED 两台）与 `devices`（`all` 或空格/逗号分隔的 board，按分支能力自动取交集）。主线走 `label=all`、源码树 `master`；WED 走 `label=wed`（只有 HG5585F CT / CT-USB-SFP）、源码树 `feat/wed-npu-offload-6.18`（由 `fw-build` 的 `source_ref` 指定 checkout ref），产物同样发 `v<日期>-<时间>-wed-r<run>` 与 `kmods-wed-r<run>`，其 kmod 只能进 `repo-wed`。wed 分支上仍保留一份自己的 `fw-all.yml`（等价 wed-only 入口）。kmod 与独立软件包另发预发布：`kmods-all-r<run>`、`pkgs-extra-<device>-r<run>`。
 
 ---
 

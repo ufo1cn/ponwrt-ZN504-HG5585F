@@ -227,7 +227,7 @@ Download field-tested images from [GitHub Releases](https://github.com/ufo1cn/po
 | FiberHome HG5585F CT (USB/SFP) | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | same (+ `usb_pcs`; `kmod-phy-maxlinear` ships by default on all five) |
 | Nokia XG-040G-MD UBI | `ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-` | same (USB + BT) |
 
-Tag scheme `v<date>-<time>-<label>-r<run>`: on `master` there is a single firmware entry `fw-all.yml` hard-wired to `label=all` (five devices). WED/NPU hardware offload lives only on branch `feat/wed-npu-offload-6.18`, which sets `label=wed` (two HG5585F images) and still publishes releases (`v<date>-<time>-wed-r<run>`) and `kmods-wed-r<run>`; its kmods may only be published into `repo-wed`. Kernel modules and standalone apps are published as prereleases `kmods-all-r<run>` and `pkgs-extra-<device>-r<run>`.
+Tag scheme `v<date>-<time>-<label>-r<run>`. The firmware entry is `fw-all.yml` on `master`: dispatch with `targets` (`all` = mainline + WED, the default; `mainline` = five devices; `wed` = the two WED images) and `devices` (`all`, or a space/comma separated board list intersected with each branch's capability). Mainline runs `label=all` on the `master` tree; WED runs `label=wed` (HG5585F CT / CT-USB-SFP only) on the `feat/wed-npu-offload-6.18` tree, selected through `fw-build.source_ref`, and publishes `v<date>-<time>-wed-r<run>` / `kmods-wed-r<run>` whose kmods may only go to `repo-wed`. The WED branch keeps its own `fw-all.yml` as a wed-only shortcut. Kernel modules and standalone apps are published as prereleases `kmods-all-r<run>` and `pkgs-extra-<device>-r<run>`.
 
 ---
 
