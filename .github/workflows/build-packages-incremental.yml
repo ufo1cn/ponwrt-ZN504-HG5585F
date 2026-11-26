@@ -197,7 +197,7 @@ jobs:
           hits=""
           for manifest in configs/pon-*.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required; do
+            while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               dir="$path"
@@ -330,7 +330,7 @@ jobs:
           touched=0
           for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required; do
+            while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               [ -f "$path/Makefile" ] || continue
@@ -383,7 +383,7 @@ jobs:
           only_pkgs="${{ inputs.only }}"
           selmiss=""
           manifest=configs/pon-userspace-packages.txt
-          while IFS='|' read -r pkgpath pkgname pkgreq; do
+          while IFS='|' read -r pkgpath pkgname pkgreq || [ -n "${pkgpath:-}" ]; do
             [ -n "${pkgpath:-}" ] || continue
             case "$pkgpath" in \#*) continue ;; esac
             if [ "$only_pkgs" != "all" ]; then
@@ -406,7 +406,7 @@ jobs:
             exit 1
           }
           strip_pkg_sel
-          while IFS='|' read -r pkgpath pkgname pkgreq; do
+          while IFS='|' read -r pkgpath pkgname pkgreq || [ -n "${pkgpath:-}" ]; do
             [ -n "${pkgpath:-}" ] || continue
             case "$pkgpath" in \#*) continue ;; esac
             if [ "$only_pkgs" != "all" ]; then
@@ -514,7 +514,7 @@ jobs:
           }
 
 
-          while IFS='|' read -r path apk required; do
+          while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
             if [ "$only" != "all" ]; then

@@ -187,7 +187,7 @@ jobs:
           hits=""
           for manifest in configs/pon-*.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required; do
+            while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               dir="$path"
@@ -251,7 +251,7 @@ jobs:
           fi
 
           # 清单内每个包先置 m，让 feed 依赖链被解析进来
-          while IFS='|' read -r path apk required; do
+          while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
             sed -i "/^CONFIG_PACKAGE_${apk}=/d;/^# CONFIG_PACKAGE_${apk} is not set/d" .config
@@ -278,7 +278,7 @@ jobs:
 
           echo ">>> 清单符号落地情况（=m 才算选中）:"
           miss=0
-          while IFS='|' read -r path apk required; do
+          while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
             if grep -q "^CONFIG_PACKAGE_${apk}=m" .config; then
@@ -597,7 +597,7 @@ jobs:
             || { echo "::error::oldconfig 之后机型行丢了"; exit 1; }
           echo ">>> =m 符号数：$(grep -c '^CONFIG_PACKAGE_.*=m' .config || true)"
           touch build_log/.loopstart
-          while IFS='|' read -r path apk required; do
+          while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
 

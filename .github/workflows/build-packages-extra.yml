@@ -235,7 +235,7 @@ jobs:
           hits=""
           for manifest in configs/pon-*.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required; do
+            while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               dir="$path"
@@ -395,7 +395,7 @@ jobs:
           dumped=0; touched=0
           for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required; do
+            while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               [ -f "$path/Makefile" ] || { echo "::warning::缺 Makefile：$path"; continue; }
@@ -467,7 +467,7 @@ jobs:
           selmiss=""
           for manifest in "${sel_manifests[@]}"; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r pkgpath pkgname pkgreq; do
+            while IFS='|' read -r pkgpath pkgname pkgreq || [ -n "${pkgpath:-}" ]; do
               [ -n "${pkgpath:-}" ] || continue
               case "$pkgpath" in \#*) continue ;; esac
               if [ "$only_pkgs" != "all" ]; then
@@ -493,7 +493,7 @@ jobs:
           strip_pkg_sel
           for manifest in "${sel_manifests[@]}"; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r pkgpath pkgname pkgreq; do
+            while IFS='|' read -r pkgpath pkgname pkgreq || [ -n "${pkgpath:-}" ]; do
               [ -n "${pkgpath:-}" ] || continue
               case "$pkgpath" in \#*) continue ;; esac
               if [ "$only_pkgs" != "all" ]; then
@@ -554,7 +554,7 @@ jobs:
               continue
             fi
             echo ">>> 清单 $manifest"
-          while IFS='|' read -r path apk required; do
+          while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
 
