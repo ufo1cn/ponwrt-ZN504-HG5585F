@@ -34,13 +34,15 @@ on:
         default: false
       idx_branch:
         description: '写哪个索引分支（repo=主线五台 / 源 master+label all；repo-wed=WED 两台 HG5585F / 源 feat/wed-npu-offload-6.18+label wed）'
-      src_branch:
-        description: '源固件分支（留空=按 idx_branch 自动：repo→master、repo-wed→feat/wed-npu-offload-6.18）。可在 master 上直接发布 wed 分支产物'
         type: choice
         options:
           - repo
           - repo-wed
         default: repo
+      src_branch:
+        description: '源固件分支（留空=按 idx_branch 自动：repo→master、repo-wed→feat/wed-npu-offload-6.18）。可在 master 上直接发布 wed 分支产物'
+        type: string
+        default: ''
 
 permissions:
   contents: read
