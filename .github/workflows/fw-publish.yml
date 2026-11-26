@@ -249,7 +249,12 @@ jobs:
           prepared = []
           errors = []
           for dev, wf, rid, rnum, commit, created in plan:
-              root = os.path.join('dl', 'run-' + rid)
+              # 同一次 run 里可能同时有 label=all 与 label=wed 两份产物（master 上 targets=all 时），
+              # 必须只取本次索引分支自己的那份，否则 wed 会误发主线镜像
+              lbl = 'all' if os.environ.get('IDX_BRANCH', 'repo') == 'repo' else 'wed'
+              root = os.path.join('dl', 'run-' + rid, 'PonWrt-firmware-%s-r%s' % (lbl, rnum))
+              if not os.path.isdir(root):
+                  root = os.path.join('dl', 'run-' + rid)
               itbs, infos = [], []
               for base, _, files in os.walk(root):
                   for fn in files:
