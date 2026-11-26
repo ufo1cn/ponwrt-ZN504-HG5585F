@@ -1,0 +1,603 @@
+From: PonWrt <dev@ponwrt.local>
+Subject: [PATCH] net: airoha: npu: add MT7916 98K RX-only compat and lightweight hostadpt RX rings
+
+Support the vendor MT7916 98K RX-only NPU firmware on AN7581:
+- Implement an open-source lightweight hostadpt slow-path RX ring engine
+  (2 x 512 x 24B descriptors = 24 KiB coherent DMA, 3500B RX skbs,
+  programming the 6 NPU CSRs 0x1ec0d034/038/180/188/190/198 and 2 IRQs
+  with NAPI polling) before booting the NPU cores, releasing the vendor
+  98K core0 while (readl(0x1ec0d190) == 0) barrier.
+- Detect MT7916 98K RX-only mode via the "airoha,npu-mt7916-rx" DT
+  property (or presence of "pkt" without "tx-bufid"/"tx-pkt") and skip
+  out-of-bounds mailbox commands (WLAN_FUNC_SET_WAIT_TX_BUF_CHECK_ADDR[32],
+  WLAN_FUNC_SET_WAIT_TX_PKT_BUF_ADDR[23], WLAN_FUNC_GET_WAIT_NPU_VERSION[10],
+  and oversized WLAN_FUNC_GET_WAIT_COUNTER[2]).
+- Expose MT7916 98K runtime helpers (BA window, STA del, BAR info,
+  RXDESC_BASE, hostadpt RX callback registration) in airoha_offload.h.
+
+---
+diff --git a/drivers/net/ethernet/airoha/airoha_npu.c b/drivers/net/ethernet/airoha/airoha_npu.c
+index ce1e5ec..3b2fde8 100644
+--- a/drivers/net/ethernet/airoha/airoha_npu.c
++++ b/drivers/net/ethernet/airoha/airoha_npu.c
+@@ -18,6 +18,8 @@
+ 
+ #define NPU_EN7581_FIRMWARE_DATA		"airoha/en7581_npu_data.bin"
+ #define NPU_EN7581_FIRMWARE_RV32		"airoha/en7581_npu_rv32.bin"
++#define NPU_EN7581_7916_FIRMWARE_DATA		"airoha/en7581_MT7916_npu_data.bin"
++#define NPU_EN7581_7916_FIRMWARE_RV32		"airoha/en7581_MT7916_npu_rv32.bin"
+ #define NPU_EN7581_7996_FIRMWARE_DATA		"airoha/en7581_MT7996_npu_data.bin"
+ #define NPU_EN7581_7996_FIRMWARE_RV32		"airoha/en7581_MT7996_npu_rv32.bin"
+ #define NPU_AN7583_FIRMWARE_DATA		"airoha/an7583_npu_data.bin"
+@@ -523,6 +525,11 @@ static int airoha_npu_wlan_msg_get(struct airoha_npu *npu, int ifindex,
+ 	struct wlan_mbox_data *wlan_data;
+ 	int err, len;
+ 
++	if (npu->mt7916_rx_only &&
++	    (func_id == WLAN_FUNC_GET_WAIT_NPU_VERSION ||
++	     func_id == WLAN_FUNC_GET_WAIT_COUNTER))
++		return -EOPNOTSUPP;
++
+ 	len = sizeof(*wlan_data) + data_len;
+ 	wlan_data = kzalloc(len, gfp);
+ 	if (!wlan_data)
+@@ -570,20 +577,30 @@ static int airoha_npu_wlan_init_memory(struct airoha_npu *npu)
+ 	if (err)
+ 		return err;
+ 
+-	cmd = WLAN_FUNC_SET_WAIT_TX_BUF_CHECK_ADDR;
+-	err = airoha_npu_wlan_set_reserved_memory(npu, 0, "tx-bufid", cmd);
+-	if (err)
+-		return err;
++	if (!npu->mt7916_rx_only &&
++	    of_property_match_string(npu->dev->of_node, "memory-region-names",
++				     "tx-bufid") >= 0) {
++		cmd = WLAN_FUNC_SET_WAIT_TX_BUF_CHECK_ADDR;
++		err = airoha_npu_wlan_set_reserved_memory(npu, 0, "tx-bufid",
++							  cmd);
++		if (err)
++			return err;
++	}
+ 
+ 	cmd = WLAN_FUNC_SET_WAIT_PKT_BUF_ADDR;
+ 	err = airoha_npu_wlan_set_reserved_memory(npu, 0, "pkt", cmd);
+ 	if (err)
+ 		return err;
+ 
+-	cmd = WLAN_FUNC_SET_WAIT_TX_PKT_BUF_ADDR;
+-	err = airoha_npu_wlan_set_reserved_memory(npu, 0, "tx-pkt", cmd);
+-	if (err)
+-		return err;
++	if (!npu->mt7916_rx_only &&
++	    of_property_match_string(npu->dev->of_node, "memory-region-names",
++				     "tx-pkt") >= 0) {
++		cmd = WLAN_FUNC_SET_WAIT_TX_PKT_BUF_ADDR;
++		err = airoha_npu_wlan_set_reserved_memory(npu, 0, "tx-pkt",
++							  cmd);
++		if (err)
++			return err;
++	}
+ 
+ 	if (of_property_match_string(npu->dev->of_node, "memory-region-names",
+ 				     "ba") >= 0) {
+@@ -630,6 +647,338 @@ static void airoha_npu_wlan_irq_disable(struct airoha_npu *npu, int q)
+ 	regmap_clear_bits(npu->regmap, REG_IRQ_RXDONE(q), NPU_IRQ_RX_MASK(q));
+ }
+ 
++/*
++ * Lightweight open-source hostadpt slow-path RX ring engine for the vendor
++ * MT7916 98K NPU firmware.
++ *
++ * The 98K firmware core0 polls readl(0x1ec0d190) == 0 during boot until the
++ * host programs both 512-entry x 24-byte (0x3000 B each, 0x6000 B total)
++ * hostadpt RX rings and their 6 NPU CSRs (0x1ec0d034/038/180/188/190/198).
++ */
++struct airoha_npu_hostadpt_ring {
++	struct airoha_npu *npu;
++	struct airoha_npu_rx_dma_desc *desc;
++	dma_addr_t desc_dma;
++	struct sk_buff *skbs[AIROHA_NPU_HOSTADPT_RING_SIZE];
++	dma_addr_t dma_addrs[AIROHA_NPU_HOSTADPT_RING_SIZE];
++	struct napi_struct napi;
++	u16 head;
++	u8 id;
++};
++
++struct airoha_npu_hostadpt {
++	struct net_device *napi_dev;
++	void *ring_mem;
++	dma_addr_t ring_dma;
++	struct airoha_npu_hostadpt_ring rings[AIROHA_NPU_HOSTADPT_NUM_RINGS];
++	spinlock_t cb_lock;
++	airoha_npu_hostadpt_rx_cb_t rx_cb;
++	void *rx_priv;
++};
++
++static_assert(sizeof(struct airoha_npu_rx_dma_desc) == 24);
++static_assert(AIROHA_NPU_HOSTADPT_RING_SIZE *
++	      sizeof(struct airoha_npu_rx_dma_desc) ==
++	      AIROHA_NPU_HOSTADPT_RING_BYTES);
++
++static int airoha_npu_hostadpt_fill_slot(struct airoha_npu_hostadpt_ring *ring,
++					 u16 idx, gfp_t gfp)
++{
++	struct airoha_npu *npu = ring->npu;
++	struct airoha_npu_rx_dma_desc *d = &ring->desc[idx];
++	struct sk_buff *skb;
++	dma_addr_t addr;
++
++	skb = __netdev_alloc_skb(npu->hostadpt->napi_dev,
++				 AIROHA_NPU_HOSTADPT_BUF_SIZE + NET_SKB_PAD,
++				 gfp);
++	if (!skb)
++		return -ENOMEM;
++
++	skb_reserve(skb, NET_SKB_PAD);
++	addr = dma_map_single(npu->dev, skb->data, AIROHA_NPU_HOSTADPT_BUF_SIZE,
++			      DMA_FROM_DEVICE);
++	if (dma_mapping_error(npu->dev, addr)) {
++		dev_kfree_skb_any(skb);
++		return -ENOMEM;
++	}
++
++	ring->skbs[idx] = skb;
++	ring->dma_addrs[idx] = addr;
++	d->addr = lower_32_bits(addr);
++	d->info = 0;
++	d->data = 0;
++	d->rsv = 0;
++	/* Ensure addr/info/data are visible to NPU before clearing DONE */
++	dma_wmb();
++	WRITE_ONCE(d->ctrl, FIELD_PREP(NPU_RX_DMA_DESC_LEN_MASK,
++				       AIROHA_NPU_HOSTADPT_BUF_SIZE));
++
++	return 0;
++}
++
++static int airoha_npu_hostadpt_napi_poll(struct napi_struct *napi, int budget)
++{
++	struct airoha_npu_hostadpt_ring *ring =
++		container_of(napi, struct airoha_npu_hostadpt_ring, napi);
++	struct airoha_npu *npu = ring->npu;
++	struct airoha_npu_hostadpt *ha = npu->hostadpt;
++	int done = 0;
++
++	while (done < budget) {
++		u16 idx = ring->head;
++		struct airoha_npu_rx_dma_desc *d = &ring->desc[idx];
++		u32 ctrl = READ_ONCE(d->ctrl);
++		struct sk_buff *skb;
++		u32 info, data, len;
++		airoha_npu_hostadpt_rx_cb_t cb;
++		void *priv;
++
++		if (!(ctrl & NPU_RX_DMA_DESC_DONE_MASK))
++			break;
++
++		dma_rmb();
++		info = READ_ONCE(d->info);
++		data = READ_ONCE(d->data);
++		len = FIELD_GET(NPU_RX_DMA_DESC_CUR_LEN_MASK, ctrl);
++
++		skb = ring->skbs[idx];
++		if (skb) {
++			dma_unmap_single(npu->dev, ring->dma_addrs[idx],
++					 AIROHA_NPU_HOSTADPT_BUF_SIZE,
++					 DMA_FROM_DEVICE);
++			ring->skbs[idx] = NULL;
++			ring->dma_addrs[idx] = 0;
++		}
++
++		if (airoha_npu_hostadpt_fill_slot(ring, idx, GFP_ATOMIC)) {
++			/* Re-arm descriptor without DONE if refill failed */
++			WRITE_ONCE(d->ctrl, 0);
++		}
++
++		ring->head = (idx + 1) & (AIROHA_NPU_HOSTADPT_RING_SIZE - 1);
++		regmap_write(npu->regmap, REG_RX_CPU_IDX(ring->id), ring->head);
++
++		if (skb) {
++			if (len > 0 && len <= AIROHA_NPU_HOSTADPT_BUF_SIZE) {
++				skb_put(skb, len);
++				spin_lock(&ha->cb_lock);
++				cb = ha->rx_cb;
++				priv = ha->rx_priv;
++				spin_unlock(&ha->cb_lock);
++
++				if (cb)
++					cb(priv, ring->id, skb, info, data);
++				else
++					dev_kfree_skb_any(skb);
++			} else {
++				dev_kfree_skb_any(skb);
++			}
++		}
++
++		done++;
++	}
++
++	if (done < budget && napi_complete_done(napi, done))
++		airoha_npu_wlan_irq_enable(npu, ring->id);
++
++	return done;
++}
++
++static irqreturn_t airoha_npu_hostadpt_irq(int irq, void *data)
++{
++	struct airoha_npu_hostadpt_ring *ring = data;
++	struct airoha_npu *npu = ring->npu;
++	u32 mask = NPU_IRQ_RX_MASK(ring->id);
++	u32 status;
++
++	regmap_read(npu->regmap, REG_IRQ_STATUS, &status);
++	if (!(status & mask))
++		return IRQ_NONE;
++
++	airoha_npu_wlan_irq_disable(npu, ring->id);
++	regmap_write(npu->regmap, REG_IRQ_STATUS, mask);
++	napi_schedule(&ring->napi);
++
++	return IRQ_HANDLED;
++}
++
++static void airoha_npu_hostadpt_cleanup(void *data)
++{
++	struct airoha_npu *npu = data;
++	struct airoha_npu_hostadpt *ha = npu->hostadpt;
++	int q, i;
++
++	if (!ha)
++		return;
++
++	for (q = 0; q < AIROHA_NPU_HOSTADPT_NUM_RINGS; q++) {
++		struct airoha_npu_hostadpt_ring *ring = &ha->rings[q];
++
++		airoha_npu_wlan_irq_disable(npu, q);
++		napi_disable(&ring->napi);
++		netif_napi_del(&ring->napi);
++
++		for (i = 0; i < AIROHA_NPU_HOSTADPT_RING_SIZE; i++) {
++			if (!ring->skbs[i])
++				continue;
++
++			dma_unmap_single(npu->dev, ring->dma_addrs[i],
++					 AIROHA_NPU_HOSTADPT_BUF_SIZE,
++					 DMA_FROM_DEVICE);
++			dev_kfree_skb_any(ring->skbs[i]);
++			ring->skbs[i] = NULL;
++		}
++	}
++
++	if (ha->napi_dev)
++		free_netdev(ha->napi_dev);
++
++	npu->hostadpt = NULL;
++}
++
++static int airoha_npu_hostadpt_init(struct airoha_npu *npu)
++{
++	struct device *dev = npu->dev;
++	struct airoha_npu_hostadpt *ha;
++	int q, i, err;
++
++	ha = devm_kzalloc(dev, sizeof(*ha), GFP_KERNEL);
++	if (!ha)
++		return -ENOMEM;
++
++	spin_lock_init(&ha->cb_lock);
++
++	ha->napi_dev = alloc_netdev_dummy(0);
++	if (!ha->napi_dev)
++		return -ENOMEM;
++	strscpy(ha->napi_dev->name, "npu_hostadpt", sizeof(ha->napi_dev->name));
++
++	ha->ring_mem = dmam_alloc_coherent(dev, AIROHA_NPU_HOSTADPT_TOTAL_BYTES,
++					   &ha->ring_dma, GFP_KERNEL);
++	if (!ha->ring_mem) {
++		free_netdev(ha->napi_dev);
++		return -ENOMEM;
++	}
++
++	npu->hostadpt = ha;
++
++	for (q = 0; q < AIROHA_NPU_HOSTADPT_NUM_RINGS; q++) {
++		struct airoha_npu_hostadpt_ring *ring = &ha->rings[q];
++		u32 ofs = q * AIROHA_NPU_HOSTADPT_RING_BYTES;
++
++		ring->npu = npu;
++		ring->id = q;
++		ring->head = 0;
++		ring->desc = ha->ring_mem + ofs;
++		ring->desc_dma = ha->ring_dma + ofs;
++
++		for (i = 0; i < AIROHA_NPU_HOSTADPT_RING_SIZE; i++) {
++			err = airoha_npu_hostadpt_fill_slot(ring, i,
++							    GFP_KERNEL);
++			if (err)
++				goto err_cleanup;
++		}
++
++		netif_napi_add(ha->napi_dev, &ring->napi,
++			       airoha_npu_hostadpt_napi_poll);
++		napi_enable(&ring->napi);
++	}
++
++	err = devm_add_action_or_reset(dev, airoha_npu_hostadpt_cleanup, npu);
++	if (err)
++		return err;
++
++	/*
++	 * Program the 6 hostadpt CSRs before core0 boots to release its
++	 * while (readl(0x1ec0d190) == 0) barrier:
++	 *   0x1ec0d180 = ring0_pa,          0x1ec0d188 = 0
++	 *   0x1ec0d190 = ring0_pa + 0x3000, 0x1ec0d198 = 0
++	 *   0x1ec0d034 = 0x10000,           0x1ec0d038 = 0x20000
++	 */
++	regmap_write(npu->regmap, REG_RX_BASE(0), lower_32_bits(ha->ring_dma));
++	regmap_write(npu->regmap, REG_RX_CPU_IDX(0), 0);
++	regmap_write(npu->regmap, REG_RX_BASE(1),
++		     lower_32_bits(ha->ring_dma +
++				   AIROHA_NPU_HOSTADPT_RING_BYTES));
++	regmap_write(npu->regmap, REG_RX_CPU_IDX(1), 0);
++	regmap_write(npu->regmap, REG_IRQ_RXDONE(0), NPU_IRQ_RX_MASK(0));
++	regmap_write(npu->regmap, REG_IRQ_RXDONE(1), NPU_IRQ_RX_MASK(1));
++
++	for (q = 0; q < AIROHA_NPU_HOSTADPT_NUM_RINGS; q++) {
++		err = devm_request_irq(dev, npu->irqs[q],
++				       airoha_npu_hostadpt_irq, IRQF_SHARED,
++				       q ? "airoha-npu-hostadpt1"
++					 : "airoha-npu-hostadpt0",
++				       &ha->rings[q]);
++		if (err)
++			return err;
++	}
++
++	dev_info(dev, "hostadpt RX rings initialized (dma=%pad, 2x%u desc)\n",
++		 &ha->ring_dma, AIROHA_NPU_HOSTADPT_RING_SIZE);
++
++	return 0;
++
++err_cleanup:
++	for (q = 0; q < AIROHA_NPU_HOSTADPT_NUM_RINGS; q++) {
++		struct airoha_npu_hostadpt_ring *ring = &ha->rings[q];
++
++		if (ring->napi.dev) {
++			napi_disable(&ring->napi);
++			netif_napi_del(&ring->napi);
++		}
++		for (i = 0; i < AIROHA_NPU_HOSTADPT_RING_SIZE; i++) {
++			if (!ring->skbs[i])
++				continue;
++
++			dma_unmap_single(dev, ring->dma_addrs[i],
++					 AIROHA_NPU_HOSTADPT_BUF_SIZE,
++					 DMA_FROM_DEVICE);
++			dev_kfree_skb_any(ring->skbs[i]);
++		}
++	}
++	free_netdev(ha->napi_dev);
++	npu->hostadpt = NULL;
++	return err;
++}
++
++int airoha_npu_hostadpt_register_rx_cb(struct airoha_npu *npu,
++				       airoha_npu_hostadpt_rx_cb_t cb,
++				       void *priv)
++{
++	struct airoha_npu_hostadpt *ha;
++	unsigned long flags;
++
++	if (!npu || !npu->hostadpt)
++		return -ENODEV;
++
++	ha = npu->hostadpt;
++	spin_lock_irqsave(&ha->cb_lock, flags);
++	ha->rx_cb = cb;
++	ha->rx_priv = priv;
++	spin_unlock_irqrestore(&ha->cb_lock, flags);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_npu_hostadpt_register_rx_cb);
++
++void airoha_npu_hostadpt_unregister_rx_cb(struct airoha_npu *npu)
++{
++	struct airoha_npu_hostadpt *ha;
++	unsigned long flags;
++
++	if (!npu || !npu->hostadpt)
++		return;
++
++	ha = npu->hostadpt;
++	spin_lock_irqsave(&ha->cb_lock, flags);
++	ha->rx_cb = NULL;
++	ha->rx_priv = NULL;
++	spin_unlock_irqrestore(&ha->cb_lock, flags);
++}
++EXPORT_SYMBOL_GPL(airoha_npu_hostadpt_unregister_rx_cb);
++
+ struct airoha_npu *airoha_npu_get(struct device *dev)
+ {
+ 	struct platform_device *pdev;
+@@ -849,6 +1198,21 @@ static int airoha_npu_probe(struct platform_device *pdev)
+ 	if (err)
+ 		return err;
+ 
++	npu->mt7916_rx_only =
++		of_property_read_bool(dev->of_node, "airoha,npu-mt7916-rx") ||
++		(of_property_match_string(dev->of_node, "memory-region-names",
++					  "pkt") >= 0 &&
++		 of_property_match_string(dev->of_node, "memory-region-names",
++					  "tx-bufid") < 0 &&
++		 of_property_match_string(dev->of_node, "memory-region-names",
++					  "tx-pkt") < 0);
++
++	if (npu->mt7916_rx_only) {
++		err = airoha_npu_hostadpt_init(npu);
++		if (err)
++			dev_warn(dev, "hostadpt init skipped: %d\n", err);
++	}
++
+ 	regmap_write(npu->regmap, REG_CR_NPU_MIB(10),
+ 		     res.start + NPU_EN7581_FIRMWARE_RV32_MAX_SIZE);
+ 	regmap_write(npu->regmap, REG_CR_NPU_MIB(11), 0x40000); /* SRAM 256K */
+@@ -866,8 +1230,11 @@ static int airoha_npu_probe(struct platform_device *pdev)
+ 	regmap_write(npu->regmap, REG_CR_BOOT_TRIGGER, 0x1);
+ 	msleep(100);
+ 
+-	if (!airoha_npu_wlan_msg_get(npu, 0, WLAN_FUNC_GET_WAIT_NPU_VERSION,
+-				     &val, sizeof(val), GFP_KERNEL)) {
++	if (npu->mt7916_rx_only) {
++		dev_info(dev, "MT7916 98K RX-only NPU mode enabled\n");
++	} else if (!airoha_npu_wlan_msg_get(npu, 0,
++					    WLAN_FUNC_GET_WAIT_NPU_VERSION,
++					    &val, sizeof(val), GFP_KERNEL)) {
+ 		npu->fw_version = val;
+ 		npu->fw_version_valid = true;
+ 		dev_info(dev, "NPU fw version: %0d.%d\n",
+@@ -891,6 +1258,8 @@ module_platform_driver(airoha_npu_driver);
+ 
+ MODULE_FIRMWARE(NPU_EN7581_FIRMWARE_DATA);
+ MODULE_FIRMWARE(NPU_EN7581_FIRMWARE_RV32);
++MODULE_FIRMWARE(NPU_EN7581_7916_FIRMWARE_DATA);
++MODULE_FIRMWARE(NPU_EN7581_7916_FIRMWARE_RV32);
+ MODULE_FIRMWARE(NPU_EN7581_7996_FIRMWARE_DATA);
+ MODULE_FIRMWARE(NPU_EN7581_7996_FIRMWARE_RV32);
+ MODULE_FIRMWARE(NPU_AN7583_FIRMWARE_DATA);
+diff --git a/include/linux/soc/airoha/airoha_offload.h b/include/linux/soc/airoha/airoha_offload.h
+index 45ff90b..4bcda2b 100644
+--- a/include/linux/soc/airoha/airoha_offload.h
++++ b/include/linux/soc/airoha/airoha_offload.h
+@@ -70,6 +70,17 @@ static inline void airoha_ppe_dev_check_skb(struct airoha_ppe_dev *dev,
+ #define NPU_RX0_DESC_NUM	512
+ #define NPU_RX1_DESC_NUM	512
+ 
++#define AIROHA_NPU_HOSTADPT_NUM_RINGS	2
++#define AIROHA_NPU_HOSTADPT_RING_SIZE	512
++#define AIROHA_NPU_HOSTADPT_BUF_SIZE	3500
++#define AIROHA_NPU_HOSTADPT_RING_BYTES	0x3000
++#define AIROHA_NPU_HOSTADPT_TOTAL_BYTES	0x6000
++
++struct airoha_npu_hostadpt;
++typedef void (*airoha_npu_hostadpt_rx_cb_t)(void *priv, int ring,
++					    struct sk_buff *skb,
++					    u32 info, u32 data);
++
+ /* CTRL */
+ #define NPU_RX_DMA_DESC_LAST_MASK	BIT(29)
+ #define NPU_RX_DMA_DESC_LEN_MASK	GENMASK(28, 15)
+@@ -184,6 +195,8 @@ struct airoha_npu {
+ 	int irqs[NPU_NUM_IRQ];
+ 
+ 	struct airoha_foe_stats __iomem *stats;
++	struct airoha_npu_hostadpt *hostadpt;
++	bool mt7916_rx_only;
+ 
+ 	struct {
+ 		int (*ppe_init)(struct airoha_npu *npu);
+@@ -264,6 +277,56 @@ static inline void airoha_npu_wlan_disable_irq(struct airoha_npu *npu, int q)
+ {
+ 	npu->ops.wlan_disable_irq(npu, q);
+ }
++
++static inline bool airoha_npu_is_mt7916_rx_only(struct airoha_npu *npu)
++{
++	return npu && npu->mt7916_rx_only;
++}
++
++static inline int airoha_npu_wlan_set_ba_win_size(struct airoha_npu *npu,
++						  int band, u8 tid, u16 wcid,
++						  u16 win_size, u16 ssn)
++{
++	u32 val = (tid & 0x7) | ((wcid & 0xff) << 3) |
++		  ((win_size & 0x1ff) << 11) | ((u32)(ssn & 0xfff) << 20);
++
++	return airoha_npu_wlan_send_msg(npu, band,
++					WLAN_FUNC_SET_WAIT_BA_WIN_SIZE,
++					&val, sizeof(val), GFP_ATOMIC);
++}
++
++static inline int airoha_npu_wlan_del_sta(struct airoha_npu *npu, int band,
++					  u16 wcid)
++{
++	u32 val = wcid & 0xffff;
++
++	return airoha_npu_wlan_send_msg(npu, band, WLAN_FUNC_SET_WAIT_DEL_STA,
++					&val, sizeof(val), GFP_ATOMIC);
++}
++
++static inline int airoha_npu_wlan_set_bar_info(struct airoha_npu *npu,
++					       int band, u8 tid, u16 wcid,
++					       u16 ssn)
++{
++	u32 val = (tid & 0x7) | ((wcid & 0xff) << 3) |
++		  ((u32)(ssn & 0xfff) << 11);
++
++	return airoha_npu_wlan_send_msg(npu, band, WLAN_FUNC_SET_WAIT_BAR_INFO,
++					&val, sizeof(val), GFP_ATOMIC);
++}
++
++static inline int airoha_npu_wlan_get_rxdesc_base(struct airoha_npu *npu,
++						  int band, u32 *base)
++{
++	return airoha_npu_wlan_get_msg(npu, band,
++				       WLAN_FUNC_GET_WAIT_RXDESC_BASE,
++				       base, sizeof(*base), GFP_KERNEL);
++}
++
++int airoha_npu_hostadpt_register_rx_cb(struct airoha_npu *npu,
++				       airoha_npu_hostadpt_rx_cb_t cb,
++				       void *priv);
++void airoha_npu_hostadpt_unregister_rx_cb(struct airoha_npu *npu);
+ #else
+ static inline struct airoha_npu *airoha_npu_get(struct device *dev)
+ {
+@@ -318,6 +381,48 @@ static inline void airoha_npu_wlan_enable_irq(struct airoha_npu *npu, int q)
+ static inline void airoha_npu_wlan_disable_irq(struct airoha_npu *npu, int q)
+ {
+ }
++
++static inline bool airoha_npu_is_mt7916_rx_only(struct airoha_npu *npu)
++{
++	return false;
++}
++
++static inline int airoha_npu_wlan_set_ba_win_size(struct airoha_npu *npu,
++						  int band, u8 tid, u16 wcid,
++						  u16 win_size, u16 ssn)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int airoha_npu_wlan_del_sta(struct airoha_npu *npu, int band,
++					  u16 wcid)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int airoha_npu_wlan_set_bar_info(struct airoha_npu *npu,
++					       int band, u8 tid, u16 wcid,
++					       u16 ssn)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int airoha_npu_wlan_get_rxdesc_base(struct airoha_npu *npu,
++						  int band, u32 *base)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int
++airoha_npu_hostadpt_register_rx_cb(struct airoha_npu *npu,
++				   airoha_npu_hostadpt_rx_cb_t cb, void *priv)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline void airoha_npu_hostadpt_unregister_rx_cb(struct airoha_npu *npu)
++{
++}
+ #endif
+ 
+ #endif /* AIROHA_OFFLOAD_H */

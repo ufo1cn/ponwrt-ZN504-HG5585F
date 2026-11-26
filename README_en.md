@@ -229,6 +229,8 @@ Download field-tested images from [GitHub Releases](https://github.com/ufo1cn/po
 
 Tag scheme `v<date>-<time>-<label>-r<run>`. The firmware entry is `fw-all.yml` on `master`: dispatch with `targets` (`all` = mainline + WED, the default; `mainline` = five devices; `wed` = the two WED images) and `devices` (`all`, or a space/comma separated board list intersected with each branch's capability). Mainline runs `label=all` on the `master` tree; WED runs `label=wed` (HG5585F CT / CT-USB-SFP only) on the `feat/wed-npu-offload-6.18` tree, selected through `fw-build.source_ref`, and publishes `v<date>-<time>-wed-r<run>` / `kmods-wed-r<run>` whose kmods may only go to `repo-wed`. The WED branch no longer carries its own `fw-all.yml`: build WED from the master entry with `targets=wed`. Kernel modules and standalone apps are published as prereleases `kmods-all-r<run>` and `pkgs-extra-<device>-r<run>`.
 
+> WED branch policy: `feat/wed-npu-offload-6.18` is fully synced with `master` and only keeps the WED/NPU patches, `an7581-npu-mt7916.dtsi` and the one-line include in `an7581-fiberhome-hg5585f-common.dtsi` (it no longer carries its own `fw-all.yml`). The switches are set explicitly on that branch: `an7581/config-6.18` enables `CONFIG_NET_VENDOR_MEDIATEK=y` + `CONFIG_NET_MEDIATEK_SOC_WED=y`, and `mt76/Makefile` passes `CONFIG_MT7915_NPU=y` + `-DCONFIG_MT7915_NPU` to `kmod-mt7915e` under `CONFIG_TARGET_airoha` (that symbol has no Kconfig entry anywhere, so a make variable is the only way). The older `wed-r39` image only carried NPU RX (`954`); the TX-side WED backend never made it into the kernel because the switch was off.
+
 ---
 
 ## 🧩 Standalone Packages & apk Repository

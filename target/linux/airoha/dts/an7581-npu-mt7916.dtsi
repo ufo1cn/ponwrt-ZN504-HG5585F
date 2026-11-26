@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+
+/*
+ * AN7581 + MT7916D hybrid offload layout:
+ * - B1 (Downlink TX): WED0/WED1 v1 + WDMA0/WDMA1 (PPE -> PSE port 3 -> WDMA -> WED)
+ * - B2 (Uplink RX):   Vendor 98K MT7916 RX-only NPU firmware + hostadpt rings
+ *
+ * Reserves 9 MiB total (8 MiB pkt + 1 MiB ba) in high DRAM (0x9e000000-0x9e8fffff)
+ * on 512 MiB devices, completely avoiding U-Boot FIT image loadaddr (0x85000000),
+ * QDMA buffers (0x87000000-0x89ffffff), and kernel image (0x8a000000-0x8c000000).
+ */
+
+&{/reserved-memory} {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	ranges;
+
+	npu_pkt: npu-pkt@9e000000 {
+		no-map;
+		reg = <0x0 0x9e000000 0x0 0x800000>;
+	};
+
+	npu_ba: npu-ba@9e800000 {
+		no-map;
+		reg = <0x0 0x9e800000 0x0 0x100000>;
+	};
+};
+
+&npu {
+	memory-region = <&npu_binary>, <&npu_pkt>, <&npu_ba>;
+	memory-region-names = "binary", "pkt", "ba";
+	firmware-name = "airoha/en7581_MT7916_npu_rv32.bin",
+			"airoha/en7581_MT7916_npu_data.bin";
+	airoha,npu-mt7916-rx;
+	status = "okay";
+};
+
+&{/soc} {
+	wdma0: wdma@1fa06000 {
+		compatible = "airoha,an7581-wdma";
+		reg = <0x0 0x1fa06000 0x0 0x400>;
+		interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;
+		status = "okay";
+	};
+
+	wdma1: wdma@1fa06400 {
+		compatible = "airoha,an7581-wdma";
+		reg = <0x0 0x1fa06400 0x0 0x400>;
+		interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>;
+		status = "okay";
+	};
+
+	wed0: wed@1fa02000 {
+		compatible = "airoha,an7581-wed";
+		reg = <0x0 0x1fa02000 0x0 0xb00>;
+		interrupts = <GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>;
+		airoha,wdma = <&wdma0>;
+		airoha,wed-id = <0>;
+		status = "okay";
+	};
+
+	wed1: wed@1fa03000 {
+		compatible = "airoha,an7581-wed";
+		reg = <0x0 0x1fa03000 0x0 0xb00>;
+		interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;
+		airoha,wdma = <&wdma1>;
+		airoha,wed-id = <1>;
+		status = "okay";
+	};
+};
+
+&eth {
+	airoha,wed = <&wed0>, <&wed1>;
+};

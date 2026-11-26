@@ -8,6 +8,7 @@
 #include <dt-bindings/leds/common.h>
 #include "an7581.dtsi"
 #include "an7581-fiberhome-ubi-parts.dtsi"
+#include "an7581-npu-mt7916.dtsi"
 
 /* Board resources shared by the FiberHome HG5585F variants. */
 

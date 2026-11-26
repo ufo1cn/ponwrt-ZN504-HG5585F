@@ -40,7 +40,7 @@
   - `952-net-mediatek-wed-allow-airoha-ops-only.patch`、`953-net-airoha-add-an7581-wed-v1-tx-offload.patch`、`954-net-airoha-npu-mt7916-rx-and-hostadpt.patch`
   - `dts/an7581-npu-mt7916.dtsi`（新增）、`dts/an7581-fiberhome-hg5585f-common.dtsi`（加一行 include）
   - `package/kernel/mt76/patches/120-mt76-npu-connac2-compat.patch`、`121-mt7915-add-airoha-npu-rx-and-double-pcie-wed.patch`
-  - 带上了上游把 NPU 保留内存搬到 high DRAM 的早启动修复；该分支 `fw-all.yml` 只编两台 HG5585F，`label=wed`，镜像 apk 源指向 `repo-wed`；发布时 `fw-publish` 用 `idx_branch=repo-wed` 把 WED 固件写进 `repo-wed` 的 Release 与 `meta/fw`，不碰主线 `repo`。
+  - 带上了上游把 NPU 保留内存搬到 high DRAM 的早启动修复；本分支不再自带 `fw-all.yml`，用 master 入口 `targets=wed` 只编两台 HG5585F（`label=wed`，镜像 apk 源指向 `repo-wed`），`targets=all` 则一次编主线+WED；发布时 `fw-publish` 用 `idx_branch=repo-wed` 把 WED 固件写进 `repo-wed` 的 Release 与 `meta/fw`，不碰主线 `repo`。
 
 ## 四、全锥 NAT（fullcone2）
 

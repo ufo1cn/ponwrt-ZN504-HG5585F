@@ -232,6 +232,8 @@
 
 版本标签规则 `v<日期>-<时间>-<label>-r<run>`。固件入口统一在 master 的 `fw-all.yml`，派发时可选 `targets`（`all`=主线+WED，默认；`mainline`=仅主线五台；`wed`=仅 WED 两台）与 `devices`（`all` 或空格/逗号分隔的 board，按分支能力自动取交集）。主线走 `label=all`、源码树 `master`；WED 走 `label=wed`（只有 HG5585F CT / CT-USB-SFP）、源码树 `feat/wed-npu-offload-6.18`（由 `fw-build` 的 `source_ref` 指定 checkout ref），产物同样发 `v<日期>-<时间>-wed-r<run>` 与 `kmods-wed-r<run>`，其 kmod 只能进 `repo-wed`。wed 分支不再保留自己的 `fw-all.yml`，编 WED 就用 master 这个入口、`targets=wed`。kmod 与独立软件包另发预发布：`kmods-all-r<run>`、`pkgs-extra-<device>-r<run>`。
 
+> WED 分支维护口径：`feat/wed-npu-offload-6.18` 与 `master` 完全同步，只额外保留 WED/NPU 相关补丁、`an7581-npu-mt7916.dtsi` 与 `an7581-fiberhome-hg5585f-common.dtsi` 里那一行 include（不再保留自己的 `fw-all.yml`）。开关是本分支显式开的：`an7581/config-6.18` 打开 `CONFIG_NET_VENDOR_MEDIATEK=y` + `CONFIG_NET_MEDIATEK_SOC_WED=y`；`mt76/Makefile` 在 `CONFIG_TARGET_airoha` 下给 `kmod-mt7915e` 传 `CONFIG_MT7915_NPU=y` + `-DCONFIG_MT7915_NPU`（这个符号全树没有 Kconfig，只能走 make 变量）。历史上的 `wed-r39` 固件只带 NPU RX（`954`），TX 侧 WED 因开关未开没有进内核。
+
 ---
 
 ## 🧩 独立软件包与 apk 仓库

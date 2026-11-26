@@ -1,0 +1,46 @@
+From: PonWrt <dev@ponwrt.local>
+Subject: [PATCH] net: mediatek: wed: allow selecting NET_MEDIATEK_SOC_WED ops-only on ARCH_AIROHA
+
+Allow CONFIG_NET_MEDIATEK_SOC_WED to be selected independently on
+ARCH_AIROHA without enabling CONFIG_NET_MEDIATEK_SOC. When
+CONFIG_NET_MEDIATEK_SOC is disabled, only mtk_wed_ops.o is built to
+export the global mtk_soc_wed_ops RCU pointer so airoha-eth can register
+its AN7581 WED v1 TX offload backend for mt76/mt7915e.
+
+---
+diff --git a/drivers/net/ethernet/mediatek/Kconfig b/drivers/net/ethernet/mediatek/Kconfig
+index 64909b0..e1f8bc2 100644
+--- a/drivers/net/ethernet/mediatek/Kconfig
++++ b/drivers/net/ethernet/mediatek/Kconfig
+@@ -8,8 +8,13 @@ config NET_VENDOR_MEDIATEK
+ if NET_VENDOR_MEDIATEK
+ 
+ config NET_MEDIATEK_SOC_WED
+-	depends on ARCH_MEDIATEK || COMPILE_TEST
+-	def_bool NET_MEDIATEK_SOC != n
++	bool "MediaTek SoC Wireless Ethernet Dispatcher (WED) support"
++	depends on ARCH_MEDIATEK || ARCH_AIROHA || COMPILE_TEST
++	default NET_MEDIATEK_SOC != n
++	help
++	  Enable the Wireless Ethernet Dispatcher (WED) operations registry.
++	  On ARCH_AIROHA this compiles only mtk_wed_ops.o so airoha-eth can
++	  register its AN7581 WED v1 backend without enabling mtk_eth_soc.
+ 
+ config NET_MEDIATEK_SOC
+ 	tristate "MediaTek SoC Gigabit Ethernet support"
+diff --git a/drivers/net/ethernet/mediatek/Makefile b/drivers/net/ethernet/mediatek/Makefile
+index 03e008f..01b6450 100644
+--- a/drivers/net/ethernet/mediatek/Makefile
++++ b/drivers/net/ethernet/mediatek/Makefile
+@@ -5,9 +5,11 @@
+ 
+ obj-$(CONFIG_NET_MEDIATEK_SOC) += mtk_eth.o
+ mtk_eth-y := mtk_eth_soc.o mtk_eth_path.o mtk_ppe.o mtk_ppe_debugfs.o mtk_ppe_offload.o
++ifdef CONFIG_NET_MEDIATEK_SOC
+ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed.o mtk_wed_mcu.o mtk_wed_wo.o
+ ifdef CONFIG_DEBUG_FS
+ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_debugfs.o
+ endif
++endif
+ obj-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_ops.o
+ obj-$(CONFIG_NET_MEDIATEK_STAR_EMAC) += mtk_star_emac.o
