@@ -37,3 +37,22 @@ package/feeds/luci/luci-app-ksmbd|luci-app-ksmbd|required
 # 属于「需要内核源码树」的包（incremental 的 preflight 会直接拒绝）。改由固件流编，
 # 见 configs/features/kmod-repo.config 的 CONFIG_PACKAGE_appfilter=m。
 package/feeds/oaf/luci-app-oaf|luci-app-oaf|required
+
+# ---- OpenClash / SQM：不进固件镜像，只出独立 apk
+#      注意：包流只认这份清单（configs/pon-extra/90-c-class.config 并未被任何工作流引用），
+#      所以这里的行才是真正决定「编不编」的地方。
+#      内核侧依赖（kmod-tun/kmod-nft-tproxy/kmod-inet-diag/kmod-sched-cake/kmod-ifb）由固件流编出，
+#      本流程只编应用层，不碰内核源码树。
+package/feeds/luci/applications/luci-app-openclash|luci-app-openclash|required
+package/feeds/packages/utils/bash|bash|required
+# ruby-yaml 不是独立源码目录，由 lang/ruby 的 stdlib 子包产出，路径写父包
+package/feeds/packages/lang/ruby|ruby|required
+package/feeds/packages/lang/ruby|ruby-yaml|required
+package/feeds/packages/utils/unzip|unzip|required
+package/feeds/luci/applications/luci-app-sqm|luci-app-sqm|required
+# luci-i18n-sqm-zh-cn 由 luci-app-sqm/po/zh_Hans 生成，同样写父包路径
+package/feeds/luci/applications/luci-app-sqm|luci-i18n-sqm-zh-cn|required
+package/feeds/packages/net/sqm-scripts|sqm-scripts|required
+# tc 是虚拟名，实际产物 tc-tiny；nftables 由 nftables-json 提供 —— 二者都在内核树内
+package/network/utils/iproute2|tc-tiny|required
+package/network/utils/nftables|nftables-json|required
