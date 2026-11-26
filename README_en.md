@@ -16,7 +16,7 @@ Customized and performance-enhanced [PonWrt](https://github.com/pbs05/ponwrt) (b
 | ZN504XG-D | `znxt_zn504xg-d` | Pure wired 2.5G (EN8811H + 3×GbE), USB |
 | FiberHome HG5382A | `fiberhome_hg5382a` | plain baseline (only `kmod-zram` + `zram-swap`) |
 | FiberHome HG5585F CT | `fiberhome_hg5585f-ct` | MT7916D DBDC AX3000 + USB 2.0 + BT |
-| FiberHome HG5585F CT (USB/SFP) | `fiberhome_hg5585f-ct-usb-sfp` | same + `kmod-phy-maxlinear` |
+| FiberHome HG5585F CT (USB/SFP) | `fiberhome_hg5585f-ct-usb-sfp` | same + `usb_pcs` (2.5G port over usb_pcs 2500base-X); `kmod-phy-maxlinear` is enabled for all five devices by `CONFIG_MODULE_DEFAULT_kmod-phy-maxlinear=y` in `an7581.config`, not specific to this device |
 | Nokia XG-040G-MD UBI | `nokia_xg-040g-md-ubi` | USB + BT |
 
 Preinstall scope is driven solely by `DEVICE_CAPS` / `DEVICE_PREINSTALL` in `configs/devices/<board>.config`; applications (OpenClash / SQM / honk / passwall2 …) are never baked into images and ship as standalone apks instead.
@@ -38,7 +38,7 @@ The table below details the technical generational gap between our enhanced PonW
 | **Out-of-the-box br-iptv Proxy** | ❌ No pre-built bridge, manual setup needed; legacy udpxy prone to L2 echo loops | ✅ **Pre-configured isolated bridge `br-iptv` (`isolate=1, learning=0`)** + `rtp2httpd` 4022 zero-copy proxy & Web player, **instant playback across all devices** |
 | **Dual-Stack Hardware Offload (PPE)** | ⚠️ Missing bridge offload patch leaves downlink offload at 17%; IPv6 PPPoE drops packets forcing users to disable HW acceleration | ✅ **Exclusive Patches 931/932 fix AN7581 PPE & bridge slave offload**: IPv4+IPv6 dual-stack 100% hardware direct routing, **gigabit wire-speed CPU ~4%, downlink offload rate up to 90%+** |
 | **Pure Cryptographic Pipeline** | ⚠️ Retains SafeXcel / EIP-93 coprocessor, causing Crypto API priority inversion and DMA penalties | ✅ **Completely eliminated `kmod-crypto-hw-eip93`**, unleashing 4-core 1.2GHz ARMv8 NEON vector compute, **WireGuard/Sing-Box lower jitter & higher throughput** |
-| **Sing-Box Native NFQUEUE & Honk eBPF** | ❌ Missing `kmod-nft-queue` / `kmod-veth`, transparent proxy crashes; relies on fragile scripts | ✅ **Images ship `kmod-veth` / `kmod-sched-bpf` / `kmod-nf-conntrack`, with sing-box `1.15.0-alpha.13` baked in**; the two NFQUEUE kmods (`kmod-nft-queue` / `kmod-nfnetlink-queue`) and `honk 0.1.0-beta.6` (`honk` + `luci-app-honk` + zh-CN i18n, `honk-core` fetched at runtime by `honk-install`) are delivered as **standalone apks**, **native TUN and eBPF gateways on demand** |
+| **Sing-Box Native NFQUEUE & Honk eBPF** | ❌ Missing `kmod-nft-queue` / `kmod-veth`, transparent proxy crashes; relies on fragile scripts | ✅ **Images ship `kmod-veth` / `kmod-sched-bpf` / `kmod-nf-conntrack`, with sing-box `1.15.0-alpha.13` baked in**; `kmod-nft-queue` ships as a **standalone apk**, while `kmod-nfnetlink-queue` is pulled in by `kmod-ipt-nfqueue=y` in `release.config` (confirmed present in the r41 image); `honk 0.1.0-beta.6` (`honk` + `luci-app-honk` + zh-CN i18n, `honk-core` fetched at runtime by `honk-install`) is likewise a **standalone apk**, **native TUN and eBPF gateways on demand** |
 | **Modern CI/CD Pipeline** | ⚠️ Single runner without compiler fingerprint matching, build takes 2~4 hours with frequent APT timeouts | ✅ **Ubuntu 24.04 + CCACHE compiler fingerprinting**, 5GB incremental cache, **build time slashed to 20~35 minutes with 99%+ reliability** |
 
 ---
@@ -224,7 +224,7 @@ Download field-tested images from [GitHub Releases](https://github.com/ufo1cn/po
 | ZN504XG-D | `ponwrt-airoha-an7581-znxt_zn504xg-d-` | `*-squashfs-sysupgrade.itb` keeps settings; `*-initramfs-recovery.itb` for U-Boot Web recovery |
 | FiberHome HG5382A | `ponwrt-airoha-an7581-fiberhome_hg5382a-` | same (plain baseline) |
 | FiberHome HG5585F CT | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-` | same (USB + Wi-Fi + BT) |
-| FiberHome HG5585F CT (USB/SFP) | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | same (+ `kmod-phy-maxlinear`) |
+| FiberHome HG5585F CT (USB/SFP) | `ponwrt-airoha-an7581-fiberhome_hg5585f-ct-usb-sfp-` | same (+ `usb_pcs`; `kmod-phy-maxlinear` ships by default on all five) |
 | Nokia XG-040G-MD UBI | `ponwrt-airoha-an7581-nokia_xg-040g-md-ubi-` | same (USB + BT) |
 
 Tag scheme `v<date>-<time>-<label>-r<run>`: on `master` there is a single firmware entry `fw-all.yml` hard-wired to `label=all` (five devices). WED/NPU hardware offload lives only on branch `feat/wed-npu-offload-6.18`, which sets `label=wed` (two HG5585F images) and still publishes releases (`v<date>-<time>-wed-r<run>`) and `kmods-wed-r<run>`; its kmods may only be published into `repo-wed`. Kernel modules and standalone apps are published as prereleases `kmods-all-r<run>` and `pkgs-extra-<device>-r<run>`.
@@ -235,7 +235,7 @@ Tag scheme `v<date>-<time>-<label>-r<run>`: on `master` there is a single firmwa
 
 Images only carry "device caps + baseline" packages; applications ship as apks and stay optional:
 
-- **Kernel modules**: built in the same tree/config as the firmware, published in `kmods-all-r<run>` (578 apks + `public-key.pem`), vermagic matches the images.
+- **Kernel modules**: built in the same tree/config as the firmware, published in `kmods-all-r<run>` (578 apks + `public-key.pem` and its `.sha256`), vermagic matches the images.
 - **kmod lifecycle**: a kmod's `kernel=<kver>~<kernel-config-fingerprint>-r<rev>` dependency is bound to the firmware kernel config. On `groups=kmods` (or `all`), `pkg-publish` first deletes every old `kmod-*.apk` under `ponwrt-k<kver>/` in that branch and then writes this batch, rebuilding the index from directories that actually exist. So stale kmods from an older kernel config never linger in the feed (the `kmods-*-r<run>` release archives stay available for rollback).
 - **Standalone apps**: `pkgs-extra-<device>-r<run>` — OpenClash, SQM suite, `bash`, `ruby` + `ruby-yaml`, `unzip`, `honk` + `luci-app-honk` + zh-CN i18n, passwall2 dependency chain (`lyaml` / `libyaml` / `libuci-lua`) and more.
 - **Online feed**: `ufo1cn/ponwrt-apk-repo`, index branch `repo` (mainline five devices, accepts `label=all` builds only); WED-branch firmware uses `repo-wed` (defaults to `label=wed` firmware and kmods; `pkg-publish.fw_labels` may override, e.g. `all,wed` from `master` to publish both branches at once — a non-default label only warns). Publishing is no longer branch-locked: both `fw-publish` and `pkg-publish` can be dispatched from `master`, and `fw-publish.src_branch` selects the source branch (blank = inferred from `idx_branch`, `repo-wed` → `feat/wed-npu-offload-6.18`). Layout `aarch64_cortex-a53/ponwrt-k<kver>/<common|usb|wifi|bt>/`. On first boot the image generates `/etc/apk/repositories.d/90-ponwrt-apk-repo.list` from the device capability table.
