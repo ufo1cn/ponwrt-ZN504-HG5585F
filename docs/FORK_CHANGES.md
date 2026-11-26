@@ -15,8 +15,8 @@
 | --- | --- | --- |
 | `fw-all.yml` | 唯一固件入口，一次 `make` 编五台机型 | 调 `fw-build.yml`，`label=all` |
 | `fw-build.yml` | 真正的编译体（内核 + kmod + 镜像 + kmod apk） | 按 `configs/devices/*.config` 装机型包；`apk_repo_branch` 决定镜像里的源分支 |
-| `fw-publish.yml` | 把固件搬进 apk-repo 的 Release 并写 `meta/fw/<device>.json` | 供 `luci-app-ponwrt-update` 检查更新；`idx_branch=repo` 发主线五台（源 `master` / label `all`），`repo-wed` 发 WED 两台 HG5585F（源 `feat/wed-npu-offload-6.18` / label `wed`） |
-| `pkg-publish.yml` | 把三条包工作流的 apk + 固件流程的 kmod apk 归入 apk-repo 并重建签名索引 | `idx_branch` 选索引分支（`repo` 只收 label `all`、`repo-wed` 只收 label `wed`，写错直接失败）；与 `fw-publish` 共用写锁 `apk-repo-write-<索引分支>` |
+| `fw-publish.yml` | 把固件搬进 apk-repo 的 Release 并写 `meta/fw/<device>.json` | 供 `luci-app-ponwrt-update` 检查更新；`idx_branch=repo` 发主线五台（源 `master` / label `all`），`repo-wed` 发 WED 两台 HG5585F（默认源 `feat/wed-npu-offload-6.18` / label `wed`，可用 `src_branch` 覆盖）；两条发布流都允许从 `master` 直接触发 |
+| `pkg-publish.yml` | 把三条包工作流的 apk + 固件流程的 kmod apk 归入 apk-repo 并重建签名索引 | `idx_branch` 选索引分支（`repo` 默认 label `all`、`repo-wed` 默认 label `wed`；`fw_labels` 可显式指定（如 `all,wed` 一次发两分支），偏离默认只告警不失败）；与 `fw-publish` 共用写锁 `apk-repo-write-<索引分支>` |
 | `build-packages-incremental.yml` / `-legacy` / `-extra` | 用户态包、旧板包、额外包 | 只编非 kmod 的用户态包，不含内核树步骤；kmod 全由 `fw-build` 编 |
 
 已删除、不得复活：`fw-usb-wifi.yml`、`fw-usb.yml`、`fw-plain.yml`、`configs/device-features.txt`、`build-firmware-manual.yml`。`PonWrt1.yml`（run 391191043）永不修改。
@@ -81,7 +81,7 @@
 
 - 固件镜像里的 apk 源由 `fw-build.yml` 生成，分支由输入 `apk_repo_branch` 决定（默认 `repo`）；目录结构 `ponwrt-k<内核版本>/<common|usb|wifi|bt>/packages.adb`。
 - 多机型构建时不在构建期写死源，而是把「机型→能力」表与源前缀装进镜像，首次启动由 `96-ponwrt-apk-repos` 按 `board_name` 生成 `90-ponwrt-apk-repo.list`。
-- `pkg-publish.yml` 的 `idx_branch` 决定写哪个索引分支；`repo-wed` 从 `repo` 拉出，专供 WED 分支固件，避免实验 kmod 混进主线。
+- `pkg-publish.yml` 的 `idx_branch` 决定写哪个索引分支；`repo-wed` 从 `repo` 拉出，专供 WED 分支固件，避免实验 kmod 混进主线。两个发布工作流都不绑定运行分支：在 `master` 上可以直接发 `repo-wed`（`fw-publish` 传 `src_branch=feat/wed-npu-offload-6.18`，`pkg-publish` 传 `fw_labels=wed`），不必切到 wed 分支再发。
 - 签名：全仓库只用同一把 `APK_SIGNING_PRIVATE_KEY`，公钥指纹 `d557dca1a8b8d30b48f7e4b910908342789d389a52db3d7225c6b72840eda4ed`；`fw-build` 与 `pkg-publish` 都会断言。
 
 - 写 apk-repo 的两条流（本仓 `fw-publish.yml`、`pkg-publish.yml`）共用同一把写锁 `apk-repo-write-<索引分支>`（`cancel-in-progress: false`）。两者都往同一分支 commit，串行排队比各自 rebase 撞运气可靠；写不同分支（`repo` / `repo-wed`）互不阻塞。

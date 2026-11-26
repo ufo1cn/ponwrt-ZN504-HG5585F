@@ -34,6 +34,8 @@ on:
         default: false
       idx_branch:
         description: '写哪个索引分支（repo=主线五台 / 源 master+label all；repo-wed=WED 两台 HG5585F / 源 feat/wed-npu-offload-6.18+label wed）'
+      src_branch:
+        description: '源固件分支（留空=按 idx_branch 自动：repo→master、repo-wed→feat/wed-npu-offload-6.18）。可在 master 上直接发布 wed 分支产物'
         type: choice
         options:
           - repo
@@ -66,6 +68,7 @@ jobs:
           SEL: ${{ inputs.devices }}
           SRC_RUN: ${{ inputs.source_run }}
           IDXB: ${{ inputs.idx_branch }}
+          SRCF: ${{ inputs.src_branch }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -82,12 +85,15 @@ jobs:
               'znxt_zn504xg-d': 'fw-all.yml',
           }
           IDX = (os.environ.get('IDXB') or 'repo').strip()
+          SRC_OVERRIDE = (os.environ.get('SRCF') or '').strip()
+          # 两个索引分支都能从 master 触发：源分支可用 src_branch 显式指定，
+          # 不再要求「repo-wed 只能在 wed 分支上发」。
           if IDX == 'repo-wed':
-              SRC_BRANCH = 'feat/wed-npu-offload-6.18'
+              SRC_BRANCH = SRC_OVERRIDE or 'feat/wed-npu-offload-6.18'
               LABEL = 'wed'
               ONLY = ['fiberhome_hg5585f-ct', 'fiberhome_hg5585f-ct-usb-sfp']
           elif IDX == 'repo':
-              SRC_BRANCH = 'master'
+              SRC_BRANCH = SRC_OVERRIDE or 'master'
               LABEL = 'all'
               ONLY = []
           else:
@@ -140,7 +146,7 @@ jobs:
               if not out:
                   sys.exit('机型 %s 在 %s 上找不到可用的成功构建（%s）' % (dev, SRC_BRANCH, wf))
               rid, rnum, sha, name, concl, created, path, hb = out.split('\t')
-              # 源 run 必须来自对应分支：repo 只认 master、repo-wed 只认 WED 分支
+              # 源 run 必须来自本次约定的分支（src_branch 可覆盖，便于 master 统一发布）
               if hb and hb != SRC_BRANCH:
                   sys.exit('源 run %s 的分支是 %s，不是 %s（%s 只发布该分支的产物）'
                            % (rid, hb, SRC_BRANCH, IDX))

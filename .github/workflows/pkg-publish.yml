@@ -31,7 +31,7 @@ on:
           - kmods
         default: all
       fw_labels:
-        description: 'kmods 分组取哪条固件入口 label（留空=按 idx_branch 推断：repo→all、repo-wed→wed）'
+        description: 'kmods 分组取哪条固件入口 label：留空=按 idx_branch 推断（repo→all、repo-wed→wed）；也可显式写 all / wed / all,wed，允许在 master 上一次发布两分支产物'
         type: string
         default: ''
       source_runs:
@@ -159,14 +159,16 @@ jobs:
           plan = []
           for g in groups:
               if g == 'kmods':
-                  if labels_in in ('', 'all'):
+                  if labels_in == '':
+                      # 留空：按索引分支取默认 label（repo→all，repo-wed→wed）
                       labels = [EXPECT_LABEL]
                   else:
                       labels = [x.strip() for x in labels_in.split(',') if x.strip()]
                       if labels != [EXPECT_LABEL]:
-                          print(f'::error::索引分支 {idx} 的 kmods 只能来自 label={EXPECT_LABEL}，'
-                                f'当前写了 {",".join(labels)}', file=sys.stderr)
-                          sys.exit(1)
+                          # 显式指定时不再硬拦：master 上一次把两分支 kmod 都发出去是允许的，
+                          # 只提示口径风险（主线固件与 WED 固件的 kmod vermagic 是否一致由来源 run 决定）。
+                          print(f'::warning::索引分支 {idx} 默认 label={EXPECT_LABEL}，'
+                                f'本次显式取 {",".join(labels)}（请确认来源 run 与分支匹配）', file=sys.stderr)
                   for label in labels:
                       if label not in FW_LABEL_MAP:
                           print(f'::error::未知固件入口 label：{label}', file=sys.stderr)
