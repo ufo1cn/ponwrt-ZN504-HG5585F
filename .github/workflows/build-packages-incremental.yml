@@ -334,9 +334,9 @@ jobs:
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               [ -f "$path/Makefile" ] || continue
-              hits=$(grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)' "$path/Makefile" | sed 's/^+//' | sort -u || true)
+              hits=$(sed -n -e '/^[[:space:]]*#/!p' "$path/Makefile" | grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)' | sed 's/^+//' | sort -u || true)
               [ -n "$hits" ] || continue
-              sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$path/Makefile"
+              sed -i -E '/^[[:space:]]*#/! s/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$path/Makefile"
               sed -i -E '/^[[:space:]]*DEPENDS/ s/[[:space:]]+/ /g; /^[[:space:]]*DEPENDS/ s/[[:space:]]+$//' "$path/Makefile"
               touched=$((touched+1))
               printf '%s\n' "$hits" >> /tmp/stripped-kmods.txt
@@ -382,6 +382,44 @@ jobs:
           . scripts/pkg-name-map.sh
           only_pkgs="${{ inputs.only }}"
           selmiss=""
+          selmissym=""
+          # 依赖闭包：清单包的运行期依赖若在 .config 里没选中，oldconfig 会把本包静默清回
+          # not set（r38 的 camwatch：依赖 ffmpeg / curl / jsonfilter 均未选中 → 被丢弃）。
+          # 依赖列表取自刚重建的 tmp/.config-package.in（此时 Makefile 的 +kmod-* 已摘掉，
+          # 元数据里不再有内核依赖）；kmod / kernel 类一律跳过（由固件流程提供）。
+          : > /tmp/sel-seen.txt
+          dep_skip() {
+            case "$1" in kmod-*|kernel|gpio-button-hotplug|appfilter|open-app-filter|oaf) return 0 ;; esac
+            return 1
+          }
+          dep_deps() {
+            awk -v want="config PACKAGE_$1" '
+              $0==want {inside=1; next}
+              /^[a-z]+ / { inside=0 }
+              inside && $1=="depends" && $2=="on" && index($3,"PACKAGE_")==1 { print substr($3,9) }
+            ' tmp/.config-package.in 2>/dev/null || true
+          }
+          sel_dep() {
+            d_sym="$1"; d_depth="$2"
+            [ -n "$d_sym" ] || return 0
+            dep_skip "$d_sym" && return 0
+            grep -qxF "$d_sym" /tmp/sel-seen.txt 2>/dev/null && return 0
+            echo "$d_sym" >> /tmp/sel-seen.txt
+            if ! grep -qx "config PACKAGE_${d_sym}" tmp/.config-package.in 2>/dev/null; then
+              echo ">>> 依赖符号不在包元数据里，跳过：${d_sym}"
+              return 0
+            fi
+            if ! grep -qE "^CONFIG_PACKAGE_${d_sym}=[ym]$" .config; then
+              sed -i "/^CONFIG_PACKAGE_${d_sym}=/d; /^# CONFIG_PACKAGE_${d_sym} is not set/d" .config
+              printf 'CONFIG_PACKAGE_%s=m\n' "$d_sym" >> .config
+              echo ">>> 补选依赖 ${d_sym}=m（深度 ${d_depth}）"
+            fi
+            [ "$d_depth" -lt 5 ] || return 0
+            for d_next in $(dep_deps "$d_sym"); do
+              sel_dep "$d_next" $((d_depth+1))
+            done
+            return 0
+          }
           manifest=configs/pon-userspace-packages.txt
           while IFS='|' read -r pkgpath pkgname pkgreq || [ -n "${pkgpath:-}" ]; do
             [ -n "${pkgpath:-}" ] || continue
@@ -391,14 +429,16 @@ jobs:
             fi
             [ -d "$pkgpath" ] || continue
             sym=$(pkg_sym_for "$pkgname")
-            grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config && continue
-            sed -i "/^CONFIG_PACKAGE_${sym}=/d; /^# CONFIG_PACKAGE_${sym} is not set/d" .config
-            printf 'CONFIG_PACKAGE_%s=m\n' "$sym" >> .config
-            if [ "$sym" = "$pkgname" ]; then
-              echo ">>> 显式选中清单包 ${pkgname}=m"
-            else
-              echo ">>> 显式选中清单包 ${pkgname} -> ${sym}=m（apk 文件名 $(pkg_apk_for "$pkgname")）"
+            if ! grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config; then
+              sed -i "/^CONFIG_PACKAGE_${sym}=/d; /^# CONFIG_PACKAGE_${sym} is not set/d" .config
+              printf 'CONFIG_PACKAGE_%s=m\n' "$sym" >> .config
+              if [ "$sym" = "$pkgname" ]; then
+                echo ">>> 显式选中清单包 ${pkgname}=m"
+              else
+                echo ">>> 显式选中清单包 ${pkgname} -> ${sym}=m（apk 文件名 $(pkg_apk_for "$pkgname")）"
+              fi
             fi
+            sel_dep "$sym" 1
           done < "$manifest"
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-sel.log 2>&1 || {
             tail -n 40 /tmp/pkg-oldconfig-sel.log
@@ -414,9 +454,16 @@ jobs:
             fi
             [ -d "$pkgpath" ] || continue
             sym=$(pkg_sym_for "$pkgname")
-            grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config || selmiss="$selmiss ${pkgname}(符号 ${sym})"
+            grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config || { selmiss="$selmiss ${pkgname}(符号 ${sym})"; selmissym="$selmissym $sym"; }
           done < "$manifest"
-          [ -z "$selmiss" ] || { echo "::error::清单包在 .config 未被选中（包名不存在或依赖不可选）:${selmiss}"; exit 1; }
+          if [ -n "$selmiss" ]; then
+            echo "::error::清单包在 .config 未被选中（包名不存在或依赖不可选）:${selmiss}"
+            for s in $selmissym; do
+              echo "--- 元数据里的 PACKAGE_${s} ---"
+              awk -v want="config PACKAGE_${s}" 'index($0,want)==1{f=1} f{print} f&&/^[a-z]+ /&&index($0,want)!=1{exit}' tmp/.config-package.in 2>/dev/null | head -n 20 || true
+            done
+            exit 1
+          fi
           echo ">>> 清单包全部已在 .config 选中（kmod/kernel/gpio 选择仍为 0）"
 
       - name: Build host tools and toolchain
