@@ -128,6 +128,20 @@ jobs:
                   sys.exit('repo-wed 只收 WED 分支编出的 %s，%s 不在其中' % (' / '.join(ONLY), ','.join(bad)))
 
           QBRANCH = SRC_BRANCH.replace('/', '%2F')
+          _arts = {}
+          def has_label_artifact(rid, label, rnum):
+              # 产物名 PonWrt-firmware-<label>-r<run_number>，用来判定这个 run 是否编出了该 label
+              key = (rid, label, rnum)
+              if key not in _arts:
+                  try:
+                      names = subprocess.check_output(
+                          ['gh', 'api', 'repos/%s/actions/runs/%s/artifacts?per_page=100' % (SRC, rid),
+                           '--jq', '.artifacts[].name'], text=True).split('\n')
+                  except Exception:
+                      names = []
+                  want = 'PonWrt-firmware-%s-r%s' % (label, rnum)
+                  _arts[key] = any(x.strip() == want for x in names)
+              return _arts[key]
           rows = []
           for dev in devices:
               wf = MAP[dev]
@@ -148,10 +162,13 @@ jobs:
               if not out:
                   sys.exit('机型 %s 在 %s 上找不到可用的成功构建（%s）' % (dev, SRC_BRANCH, wf))
               rid, rnum, sha, name, concl, created, path, hb = out.split('\t')
-              # 源 run 必须来自本次约定的分支（src_branch 可覆盖，便于 master 统一发布）
+              # 源 run 归属：分支自己编自己发，或 master 统一入口编出来的对应 label 产物
               if hb and hb != SRC_BRANCH:
-                  sys.exit('源 run %s 的分支是 %s，不是 %s（%s 只发布该分支的产物）'
-                           % (rid, hb, SRC_BRANCH, IDX))
+                  if not has_label_artifact(rid, LABEL, rnum):
+                      sys.exit('源 run %s 分支是 %s，且没有 label=%s 的产物，不能发到 %s'
+                               % (rid, hb, LABEL, IDX))
+                  print('    run %s 来自统一入口（head_branch=%s），按 label=%s 产物归属发布'
+                        % (rid, hb, LABEL))
               if concl and concl != 'success':
                   sys.exit('源 run %s 结论是 %s，不是 success' % (rid, concl))
               # 指定 source_run 时可能是 manual 之类的入口，索引里要写实际入口文件名
