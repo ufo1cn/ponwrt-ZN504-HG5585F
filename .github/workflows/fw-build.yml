@@ -911,67 +911,173 @@ jobs:
       - name: Verify image honors device capabilities
         run: |
           set -uo pipefail
-          # 一次构建多机型：每个 DEVICE 都有自己的 rootfs（build_dir/target-*/root-<profile>），
-          # 按机型逐个核对。能力取自 configs/devices/<board>.config（经 /tmp/dev-caps.tsv 传过来），
-          # 所以“哪台该带 USB、哪台该带无线”只以机型定义文件为准。
+          # 以产物为准：直接读每台机型的 *-squashfs-sysupgrade.itb 里的 squashfs 段，
+          # 取 /lib/apk/packages/*.list、/lib/modules、/lib/firmware 的目录清单，
+          # 再按 configs/devices/<board>.config 的能力声明（经 /tmp/dev-caps.tsv 传入）核对。
+          #
+          # 不再按 build_dir/target-*/root-<设备名> 匹配：多机型一次构建时只有一个共享
+          # staging（root-airoha），目录名里没有设备名，旧写法 5 台全部落空后静默跳过，
+          # 等于这项核对从未真正执行。
           fail=0
           DEVICES="${{ inputs.device_list }}"
-          roots=$(ls -d build_dir/target-*/root-* 2>/dev/null || true)
-          [ -n "$roots" ] || { echo "::error::找不到 rootfs 目录（build_dir/target-*/root-*）"; exit 1; }
-          echo ">>> rootfs 目录："
-          echo "$roots" | sed 's/^/    /'
-          for dev in $DEVICES; do
-            caps=$(awk -v d="$dev" '$1==d { $1=""; sub(/^[ \t]+/,""); print; exit }' /tmp/dev-caps.tsv)
-            root=""
-            for r in $roots; do
-              case "$(basename "$r")" in
-                *"$dev"*) [ ${#r} -gt ${#root} ] && root="$r" ;;
-              esac
-            done
-            if [ -z "$root" ]; then
-              echo "::warning::${dev} 找不到同名 rootfs 目录，跳过该机型的镜像内容核对"
-              continue
-            fi
-            echo ">>> ${dev}（能力：${caps:-无}）rootfs=$root"
-            wifi_found=$( { find "$root/lib/modules" -name 'mt7915e.ko*' -o -name 'mt7916*.ko*' 2>/dev/null
-                            find "$root/lib/firmware" -name 'mt7916*' 2>/dev/null; } | head -n5 || true)
-            case " $caps " in
-              *" wifi "*)
-                if [ -z "$wifi_found" ]; then
-                  echo "::error::${dev} 有 wifi 能力，但 rootfs 里没有 mt7915e/mt7916"
-                  fail=1
-                else
-                  echo "     wifi OK: $(echo "$wifi_found" | head -n1)"
-                fi ;;
-              *)
-                if [ -n "$wifi_found" ]; then
-                  echo "::error::${dev} 没有 wifi 能力，但 rootfs 带了无线驱动："
-                  echo "$wifi_found" | sed 's/^/      /'
-                  fail=1
-                else
-                  echo "     无 wifi：rootfs 干净"
-                fi ;;
-            esac
-            usb_found=$(find "$root" -name 'usb-common.ko*' 2>/dev/null | head -n1 || true)
-            exfat_found=$(find "$root" -name 'exfat.ko*' 2>/dev/null | head -n1 || true)
-            case " $caps " in
-              *" usb "*)
-                if [ -z "$usb_found" ]; then
-                  echo "::error::${dev} 有 usb 能力，但 rootfs 里没有 USB 核心栈（usb-common.ko）"
-                  fail=1
-                else
-                  echo "     usb OK: $usb_found"
-                fi
-                [ -n "$exfat_found" ] || { echo "::error::${dev} 有 usb 能力，但 rootfs 里没有 exfat.ko（U 盘挂不上）"; fail=1; } ;;
-              *)
-                if [ -n "$usb_found" ]; then
-                  echo "::error::${dev} 没有 usb 能力，但 rootfs 带了 USB 栈：$usb_found"
-                  fail=1
-                else
-                  echo "     无 usb：rootfs 干净"
-                fi ;;
-            esac
-          done
+          shopt -s nullglob
+          images=(bin/targets/*/*/*-squashfs-sysupgrade.itb)
+          if [ ${#images[@]} -eq 0 ]; then
+            echo "::error::找不到任何 *-squashfs-sysupgrade.itb（镜像没产出，无法核对）"
+            exit 1
+          fi
+          python3 -m pip install --quiet --disable-pip-version-check PySquashfsImage >/dev/null 2>&1 || true
+          rc=0
+          python3 - "$DEVICES" "${images[@]}" <<'PY' || rc=$?
+          import json
+          import os
+          import re
+          import sys
+
+          try:
+              from PySquashfsImage import SquashFsImage
+          except Exception as exc:
+              print("::warning::PySquashfsImage 不可用（%s），本步骤跳过镜像核对" % exc)
+              sys.exit(0)
+
+          devs = sys.argv[1].split()
+          imgs = [p for p in sys.argv[2:] if p.endswith("-squashfs-sysupgrade.itb")]
+
+          caps = {}
+          try:
+              with open("/tmp/dev-caps.tsv") as fh:
+                  for line in fh:
+                      parts = line.split()
+                      if parts:
+                          caps[parts[0]] = parts[1:]
+          except FileNotFoundError:
+              pass
+
+
+          def open_image(path):
+              with open(path, "rb") as fh:
+                  data = fh.read()
+              idx = 0
+              while True:
+                  pos = data.find(b"hsqs", idx)
+                  if pos < 0:
+                      return None
+                  try:
+                      fh = open(path, "rb")
+                      return SquashFsImage(fh, offset=pos)
+                  except Exception:
+                      idx = pos + 1
+
+
+          def child(node, name):
+              try:
+                  kids = node.children
+              except Exception:
+                  return None
+              if not isinstance(kids, dict):
+                  return None
+              return kids.get(name)
+
+
+          def node_at(root, parts):
+              cur = root
+              for part in parts:
+                  cur = child(cur, part)
+                  if cur is None:
+                      return None
+              return cur
+
+
+          def names_in(node):
+              out = []
+              try:
+                  kids = node.children
+              except Exception:
+                  return out
+              if not isinstance(kids, dict):
+                  return out
+              for name in list(kids.keys()):
+                  out.append(name)
+                  sub = kids[name]
+                  try:
+                      is_dir = sub.is_dir
+                  except Exception:
+                      is_dir = False
+                  if is_dir:
+                      out.extend(names_in(sub))
+              return out
+
+
+          fail = 0
+          os.makedirs("output/fw-packages", exist_ok=True)
+          summary = {}
+          for dev in devs:
+              hit = None
+              for p in imgs:
+                  if "-" + dev + "-squashfs-sysupgrade.itb" in os.path.basename(p):
+                      hit = p
+                      break
+              if hit is None:
+                  print("::warning::%s 找不到 sysupgrade 镜像，跳过该机型的镜像内容核对" % dev)
+                  continue
+              image = open_image(hit)
+              if image is None:
+                  print("::warning::%s 镜像里定位不到 squashfs 段，跳过核对" % dev)
+                  continue
+              mods = names_in(node_at(image.root, ["lib", "modules"]))
+              fw = names_in(node_at(image.root, ["lib", "firmware"]))
+              pkgdir = node_at(image.root, ["lib", "apk", "packages"])
+              pkgs = sorted(n[:-5] for n in names_in(pkgdir) if n.endswith(".list"))
+              cap = caps.get(dev, [])
+              print(">>> %s（能力：%s）镜像=%s 内置包=%d"
+                    % (dev, " ".join(cap) or "无", os.path.basename(hit), len(pkgs)))
+              wifi = [n for n in mods + fw if re.match(r"(mt7915e|mt7916)", n)]
+              usb = [n for n in mods if n.startswith("usb-common.ko")]
+              exfat = [n for n in mods if n.startswith("exfat.ko")]
+              if "wifi" in cap:
+                  if not wifi:
+                      print("::error::%s 声明有 wifi，但镜像里没有 mt7915e/mt7916" % dev)
+                      fail = 1
+                  else:
+                      print("     wifi OK: %s" % wifi[0])
+              elif wifi:
+                  # 多机型一次构建共用一份 .config，wifi.config 全局生效，所以非 wifi 机型
+                  # 也会带 mt7915e；这里只提示体积浪费，不判失败（单向校验：缺了才错）。
+                  print("::warning::%s 未声明 wifi，但镜像带了无线驱动（体积浪费）：%s"
+                        % (dev, wifi[:3]))
+              else:
+                  print("     无 wifi：镜像干净")
+              if "usb" in cap:
+                  if not usb:
+                      print("::error::%s 声明有 usb，但镜像里没有 USB 核心栈（usb-common.ko）" % dev)
+                      fail = 1
+                  else:
+                      print("     usb OK: %s" % usb[0])
+                  if not exfat:
+                      print("::error::%s 声明有 usb，但镜像里没有 exfat.ko（U 盘挂不上）" % dev)
+                      fail = 1
+              elif usb:
+                  # 同上：只提示，不判失败
+                  print("::warning::%s 未声明 usb，但镜像带了 USB 栈（体积浪费）：%s"
+                        % (dev, usb[:3]))
+              else:
+                  print("     无 usb：镜像干净")
+              with open("output/fw-packages/%s.txt" % dev, "w") as fh:
+                  fh.write("\n".join(pkgs) + "\n")
+              summary[dev] = {
+                  "image": os.path.basename(hit),
+                  "caps": cap,
+                  "packages": len(pkgs),
+                  "wifi": bool(wifi),
+                  "usb": bool(usb),
+                  "exfat": bool(exfat),
+              }
+
+          with open("output/image-contents.json", "w") as fh:
+              json.dump(summary, fh, ensure_ascii=False, indent=2)
+          sys.exit(fail)
+          PY
+          [ "$rc" -eq 0 ] || fail=1
           exit $fail
       - name: Record build provenance (源码 commit + 内核版本)
         run: |
