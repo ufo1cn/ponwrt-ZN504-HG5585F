@@ -71,3 +71,6 @@ package/honk|honk|required
 package/luci-app-honk|luci-app-honk|required
 # luci-i18n-honk-zh-cn 由 luci-app-honk/po/zh_Hans 生成，路径写父包
 package/luci-app-honk|luci-i18n-honk-zh-cn|required
+
+# ---- camwatch 已移交 incremental 流（configs/pon-userspace-packages.txt）----
+# 它与 camlive 同树同流，DEPENDS 直接写 +camlive，两个 apk 一次编齐，不再跨流装机。

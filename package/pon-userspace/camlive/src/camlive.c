@@ -71,8 +71,10 @@ static int g_rtsp_port = 8554, g_http_port = -1;
 static const char *g_dev = "/dev/video0";
 
 static unsigned char *g_jpeg;
+static unsigned char *g_snap;		/* 主线程发送/快照用的影子缓冲 */
 static int g_jpeg_len;
 static unsigned int g_seq;
+static struct timeval g_last_frame;	/* 最近一帧的时间戳，用于 /status.json 判卡流 */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_wake[2] = { -1, -1 };
 static volatile int g_run = 1;
@@ -267,6 +269,7 @@ static void *capture_thread(void *arg)
 			memcpy(g_jpeg, g_buf[idx], b.bytesused);
 			g_jpeg_len = (int)b.bytesused;
 			g_seq++;
+			gettimeofday(&g_last_frame, NULL);
 			pthread_mutex_unlock(&g_lock);
 			wake_io();
 
@@ -371,8 +374,81 @@ static const char g_index_page[] =
 	"<!doctype html><html><head><meta name=viewport "
 	"content=\"width=device-width,initial-scale=1\"><title>CamLive</title></head>"
 	"<body style=\"margin:0;background:#111;color:#ddd;font-family:sans-serif\">"
-	"<div style=\"padding:6px\">CamLive MJPEG 推流（RTSP: rtsp://本机IP/"
-	"）</div><img src=\"/stream\" style=\"width:100%;height:auto\"></body></html>";
+	"<div style=\"padding:6px\">CamLive MJPEG 推流（RTSP: rtsp://本机IP/ ｜ "
+	"单帧: <a style=\"color:#8cf\" href=\"/snapshot.jpg\">/snapshot.jpg</a> ｜ "
+	"状态: <a style=\"color:#8cf\" href=\"/status.json\">/status.json</a>）"
+	"</div><img src=\"/stream\" style=\"width:100%;height:auto\"></body></html>";
+
+/* 发送定长响应并关闭连接（返回 -1 让调用方 cli_close） */
+static int http_reply_body(struct client *c, int code, const char *reason,
+			   const char *ctype, const char *body, int len)
+{
+	char head[256];
+	int n;
+
+	if (len <= 0 || !body)
+		return -1;
+	n = snprintf(head, sizeof(head),
+		     "HTTP/1.1 %d %s\r\n"
+		     "Content-Type: %s\r\n"
+		     "Content-Length: %d\r\n"
+		     "Cache-Control: no-store\r\n"
+		     "Connection: close\r\n\r\n",
+		     code, reason, ctype, len);
+	if (n <= 0)
+		return -1;
+	if (send_nb(c->fd, head, (size_t)n) != 0)
+		return -1;
+	if (send_nb(c->fd, body, (size_t)len) != 0)
+		return -1;
+	return -1;	/* 定长响应发送完毕，关闭连接 */
+}
+
+/* 单帧快照：把当前最新 MJPEG 帧原样返回，零转码 */
+static int http_snapshot(struct client *c)
+{
+	int len = 0;
+
+	pthread_mutex_lock(&g_lock);
+	if (g_jpeg_len > 0) {
+		memcpy(g_snap, g_jpeg, (size_t)g_jpeg_len);
+		len = g_jpeg_len;
+	}
+	pthread_mutex_unlock(&g_lock);
+
+	if (len <= 0)
+		return http_reply_body(c, 503, "Service Unavailable",
+				       "text/plain", "no frame yet\n", 12);
+	return http_reply_body(c, 200, "OK", "image/jpeg", (char *)g_snap, len);
+}
+
+/* 运行状态：抓帧脚本用它判断流是否卡住（frame_age_ms 持续增大即卡流） */
+static int http_status(struct client *c)
+{
+	char body[320];
+	struct timeval now;
+	long age = -1;
+	int i, clients = 0, len, n;
+
+	pthread_mutex_lock(&g_lock);
+	len = g_jpeg_len;
+	pthread_mutex_unlock(&g_lock);
+	gettimeofday(&now, NULL);
+	if (g_last_frame.tv_sec)
+		age = (now.tv_sec - g_last_frame.tv_sec) * 1000L +
+		      (now.tv_usec - g_last_frame.tv_usec) / 1000L;
+	for (i = 0; i < MAX_CLIENTS; i++)
+		if (g_cli[i].fd >= 0)
+			clients++;
+	n = snprintf(body, sizeof(body),
+		     "{\"device\":\"%s\",\"w\":%d,\"h\":%d,\"fps\":%d,"
+		     "\"seq\":%u,\"frame_len\":%d,\"frame_age_ms\":%ld,"
+		     "\"clients\":%d,\"mjpeg\":true}\n",
+		     g_dev, g_w, g_h, g_fps, g_seq, len, age, clients);
+	if (n <= 0)
+		return -1;
+	return http_reply_body(c, 200, "OK", "application/json", body, n);
+}
 
 static int http_send_frame(struct client *c, const unsigned char *jpg, int len)
 {
@@ -590,6 +666,10 @@ static int http_handle(struct client *c)
 		c->last_seq = g_seq;
 		return 0;
 	}
+	if (strstr(c->req, "GET /snapshot.jpg") || strstr(c->req, "GET /snapshot "))
+		return http_snapshot(c);
+	if (strstr(c->req, "GET /status.json"))
+		return http_status(c);
 	(void)send_nb(c->fd, g_index_page, strlen(g_index_page));
 	return -1;
 }
@@ -681,7 +761,6 @@ static void push_frame(const unsigned char *jpg, int len)
 int main(int argc, char **argv)
 {
 	pthread_t cap;
-	unsigned char *snap;
 	int lrtsp, lhttp = -1;
 	int i;
 
@@ -721,8 +800,8 @@ int main(int argc, char **argv)
 	signal(SIGPIPE, SIG_IGN);
 
 	g_jpeg = malloc(MAX_FRAME);
-	snap = malloc(MAX_FRAME);
-	if (!g_jpeg || !snap) {
+	g_snap = malloc(MAX_FRAME);
+	if (!g_jpeg || !g_snap) {
 		logmsg("内存不足");
 		return 1;
 	}
@@ -811,9 +890,9 @@ int main(int argc, char **argv)
 					;
 				pthread_mutex_lock(&g_lock);
 				if (g_jpeg_len > 0) {
-					memcpy(snap, g_jpeg, (size_t)g_jpeg_len);
+					memcpy(g_snap, g_jpeg, (size_t)g_jpeg_len);
 					pthread_mutex_unlock(&g_lock);
-					push_frame(snap, g_jpeg_len);
+					push_frame(g_snap, g_jpeg_len);
 					continue;
 				}
 				pthread_mutex_unlock(&g_lock);
@@ -892,6 +971,6 @@ int main(int argc, char **argv)
 	if (lhttp >= 0)
 		close(lhttp);
 	free(g_jpeg);
-	free(snap);
+	free(g_snap);
 	return 0;
 }
