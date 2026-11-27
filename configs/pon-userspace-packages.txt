@@ -15,6 +15,10 @@ package/pon-userspace/camwatch|camwatch|required
 package/pon-userspace/luci-app-go2rtc|luci-app-go2rtc|required
 package/pon-userspace/luci-app-ser2net|luci-app-ser2net|required
 package/pon-userspace/luci-app-btsp|luci-app-btsp|required
+package/pon-userspace/triggerhappy|triggerhappy|required
+package/pon-userspace/luci-app-audiorec|luci-app-audiorec|required
+# LuCI 概览温度行取数脚本：不内置，随包流出独立 apk（装上去才会显示温度行）
+package/pon-userspace/tempinfo|tempinfo|required
 
 # ---- 蓝牙音频（自建包，源码来自上游 arkq/bluez-alsa）----
 package/pon-userspace/bluez-alsa|bluez-alsa|required
