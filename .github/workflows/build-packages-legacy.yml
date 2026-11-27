@@ -454,10 +454,14 @@ jobs:
           n=0
           for d in build_dir/host build_dir/toolchain-* staging_dir/host staging_dir/toolchain-*; do
             [ -e "$d" ] || continue
-            find "$d" -type f -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
+            # 只把 stamp 推到未来：make 判定的是「目标比前置新」，若源文件也推成同一刻，
+            # 目标与前置等时 → 全部判成过期（extra #49/#50 实测：整套 tools 重编、
+            # tools/xxhash 直接失败）。所以 stamp=2035、其余文件压到 2026-06-01（更早）。
+            find "$d" -type f ! -path '*/stamp/*' -exec touch -d '2026-06-01 00:00:00' {} + 2>/dev/null || true
+            find "$d" -type f -path '*/stamp/*' -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
             n=$((n+1))
           done
-          echo ">>> 时间戳归一：${n} 个目录已推到 2035-01-01（make 才会跳过已编产物）"
+          echo ">>> 时间戳归一：${n} 个目录已归一（stamp=2035、源文件=2026-06-01，make 才会跳过已编产物）"
 
       - name: Build host tools and toolchain
         run: |
