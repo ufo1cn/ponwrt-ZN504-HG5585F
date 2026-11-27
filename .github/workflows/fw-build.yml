@@ -1197,10 +1197,30 @@ jobs:
           ko=$(find build_dir/target-*/linux-*/ -name '*.ko' -print 2>/dev/null | head -n1 || true)
           ver=""
           [ -n "$ko" ] && ver=$(modinfo -F vermagic "$ko" 2>/dev/null | head -n1 || true)
-          # 内核配置指纹：与 OpenWrt 的 LINUX_VERMAGIC 同算法（.config.set 里所有 =y/=m 行排序后 md5）。
-          # kernel 包版本就是 6.18.60~<该值>-r1，kmod apk 的依赖串认的就是它；
-          # 这里把它写进 build-info，作为“包流程必须与固件同源”的唯一比对基准。
-          khash=$(grep '=[ym]' build_dir/target-*/linux-*/.config.set 2>/dev/null | LC_ALL=C sort | md5sum | awk '{print $1}' || true)
+          # 内核配置指纹：OpenWrt 在 Kernel/Configure 末尾生成
+          #   grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | md5 > $(LINUX_DIR)/.vermagic
+          # kmod 包的 EXTRA_DEPENDS 就是“kernel (=6.18.60~<该值>-r1)”，所以 .vermagic
+          # 才是“包流程必须与固件同源”的机械判据：直接读它，不在这里重算。
+          # 旧写法 build_dir/target-*/linux-*/.config.set 少了一层目录——
+          # LINUX_DIR = build_dir/target-*/linux-<board>_<subtarget>/linux-<ver>。
+          # glob 落空后 md5sum 收到空流，写出空串 md5
+          # d41d8cd98f00b204e9800998ecf8427e，看起来像指纹，实际等于没有指纹。
+          vfile=$(find build_dir -maxdepth 5 -type f -name '.vermagic' 2>/dev/null | head -n1 || true)
+          khash=""
+          if [ -n "${vfile:-}" ] && [ -s "$vfile" ]; then
+            khash=$(tr -d ' \r\n' < "$vfile")
+          else
+            # 兜底：内核尚未 Configure 时没有 .vermagic，用 .config.set 按同一算法现算
+            cset=$(find build_dir -maxdepth 5 -type f -name '.config.set' 2>/dev/null | head -n1 || true)
+            if [ -n "${cset:-}" ] && [ -s "$cset" ]; then
+              khash=$(grep '=[ym]' "$cset" | LC_ALL=C sort | md5sum | awk '{print $1}')
+            fi
+          fi
+          if [ -n "${khash:-}" ]; then
+            echo ">>> 内核配置指纹（.vermagic）：${khash}"
+          else
+            echo "::warning::拿不到内核 .vermagic / .config.set，kernel_config_hash 记为 unknown（不再写空串 md5）"
+          fi
           pub=$(sha256sum public-key.pem 2>/dev/null | awk '{print $1}' || true)
           {
             echo "device=${{ inputs.device_list }}"
@@ -1388,6 +1408,7 @@ jobs:
                   'commit': info.get('ponwrt_commit', ''),
                   'kernel_version': info.get('kernel_version', 'unknown'),
                   'kmod_vermagic': info.get('kmod_vermagic', 'unknown'),
+                  'kernel_config_hash': info.get('kernel_config_hash', 'unknown'),
                   'built_at': info.get('built_at', ''),
                   'sysupgrade': {
                       'name': up,
