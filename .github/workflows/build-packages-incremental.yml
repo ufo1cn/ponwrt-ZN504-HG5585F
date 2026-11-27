@@ -845,10 +845,15 @@ jobs:
             grep -q 'define Package/' "$mk" || return 0
             grep -q 'KERNEL_MAKE' "$mk" || return 0
             sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+)//g' "$mk"
+            # 只摘 Build/Compile 不够：KernelPackage/xxx 这段定义会让 .built 依赖
+            # build_dir/.../linux-<ver>/.config（内核树），包流没有内核源码，会报
+            # "No rule to make target .../.config"。整段定义和它的 eval 一行一起删掉。
+            sed -i '/^define KernelPackage\//,/^endef/d' "$mk"
+            sed -i '/^\$(eval \$(call KernelPackage,/d' "$mk"
             if grep -q 'KERNEL_MAKE' "$mk"; then
               printf '\nBuild/Compile=$(call Build/Compile/Default)\n' >> "$mk"
-              echo ">>> 已改写 $mk：摘掉内联 KERNEL_MAKE，Build/Compile 回落到默认用户态编译"
             fi
+            echo ">>> 已改写 $mk：删掉内联 KernelPackage 段、摘掉 +kmod-*，Build/Compile 回落到默认用户态编译"
           }
 
           flush_batch() {

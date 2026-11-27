@@ -42,4 +42,9 @@ define Package/camwatch/install
 	$(INSTALL_CONF) ./files/camwatch.config $(1)/etc/config/camwatch
 endef
 
+# 纯脚本包（只有 files/，没有 src/ 与上游源码）：必须显式声明空的 Build/Compile，
+# 否则 OpenWrt 默认会在 PKG_BUILD_DIR 里跑 make，报 "No targets specified and no makefile found"。
+define Build/Compile
+endef
+
 $(eval $(call BuildPackage,camwatch))
