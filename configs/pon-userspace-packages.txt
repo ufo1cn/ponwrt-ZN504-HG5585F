@@ -11,6 +11,7 @@ package/pon-userspace/go2rtc|go2rtc|required
 package/pon-userspace/gensio|gensio|required
 package/pon-userspace/ser2net|ser2net|required
 package/pon-userspace/luci-app-camlive|luci-app-camlive|required
+package/pon-userspace/camwatch|camwatch|required
 package/pon-userspace/luci-app-go2rtc|luci-app-go2rtc|required
 package/pon-userspace/luci-app-ser2net|luci-app-ser2net|required
 package/pon-userspace/luci-app-btsp|luci-app-btsp|required

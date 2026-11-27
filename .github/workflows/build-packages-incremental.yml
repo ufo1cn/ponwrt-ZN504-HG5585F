@@ -155,11 +155,11 @@ jobs:
             staging_dir/target-*
             staging_dir/host
             bin/packages
-          key: ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-${{ github.run_id }}
+          key: ponwrt-tree-${{ inputs.device }}-inc-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', 'package/**', 'target/linux/**') }}-${{ github.run_id }}
           # 只复用「同一源码 commit + 同一配置」的树：跨 commit 复用会把别的内核的
           # build_dir/staging_dir 拉回来，正是 kmod ABI 对不上的一大来源
           restore-keys: |
-            ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-
+            ponwrt-tree-${{ inputs.device }}-inc-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', 'package/**', 'target/linux/**') }}-
 
       # 交叉工具链（gcc/binutils/musl）单独一份稳定 key 的缓存：
       # 原来它跟着 tree cache 走（key 带 run/sha，等于每 run 重存 300-400MB），
@@ -935,7 +935,7 @@ jobs:
             staging_dir/target-*
             staging_dir/host
             bin/packages
-          key: ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-${{ github.run_id }}
+          key: ponwrt-tree-${{ inputs.device }}-inc-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', 'package/**', 'target/linux/**') }}-${{ github.run_id }}
 
       - name: Stage host apk tool for the publish workflow
         if: always()

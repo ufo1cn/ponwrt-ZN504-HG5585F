@@ -19,9 +19,10 @@ define Package/camwatch
   CATEGORY:=Utilities
   SUBMENU:=Multimedia
   TITLE:=CamWatch 事件录像（画面变化 + 判人 + 保持退出）
-  # 运行期还要 camlive（提供 /snapshot.jpg），但 camlive 的 Makefile 带 +kmod-video-uvc，
-  # 写进 DEPENDS 会让包流把内核链拉进来，所以只声明纯用户态依赖，安装时先装 camlive。
-  DEPENDS:=+ffmpeg +curl +jsonfilter
+  # 运行期依赖 camlive（提供 /snapshot.jpg 与 /status.json）。camlive 自己带的
+  # +kmod-video-uvc 由包流的 DEPENDS strip 摘掉，固件流已编出该 kmod（usb.config 里 =m），
+  # 所以这里可以直接声明 +camlive，包流不会因此拉内核链。
+  DEPENDS:=+ffmpeg +curl +jsonfilter +camlive
 endef
 
 define Package/camwatch/description

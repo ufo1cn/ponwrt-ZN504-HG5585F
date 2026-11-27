@@ -72,8 +72,5 @@ package/luci-app-honk|luci-app-honk|required
 # luci-i18n-honk-zh-cn 由 luci-app-honk/po/zh_Hans 生成，路径写父包
 package/luci-app-honk|luci-i18n-honk-zh-cn|required
 
-# ---- camwatch（事件录像：画面变化 + 判人 + 保持退出，只出 apk、不进镜像）----
-# 运行期依赖 camlive 的 /snapshot.jpg 与 /status.json，camlive 由 incremental 流编成 apk，
-# 装机时先 apk add camlive；这里不进 DEPENDS，避免包流把 camlive 的 +kmod-video-uvc 拉进内核链。
-# ffmpeg/curl/jsonfilter 都是纯用户态包，已在软仓 common 里。
-package/pon-userspace/camwatch|camwatch|required
+# ---- camwatch 已移交 incremental 流（configs/pon-userspace-packages.txt）----
+# 它与 camlive 同树同流，DEPENDS 直接写 +camlive，两个 apk 一次编齐，不再跨流装机。

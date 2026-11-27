@@ -166,10 +166,10 @@ jobs:
             staging_dir/target-*
             staging_dir/host
             bin/packages
-          key: ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', '.ci-source-commit') }}-${{ github.run_id }}
+          key: ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'package/**', 'target/linux/**') }}-${{ github.run_id }}
           restore-keys: |
-            ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', '.ci-source-commit') }}-
-            ponwrt-tree-${{ inputs.device }}-
+            ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'package/**', 'target/linux/**') }}-
+            ponwrt-tree-${{ inputs.device }}-extra-
 
       # 交叉工具链（gcc/binutils/musl）单独一份稳定 key 的缓存：
       # 原来它跟着 tree cache 走（key 带 run/sha，等于每 run 重存 300-400MB），
@@ -924,7 +924,7 @@ jobs:
             staging_dir/target-*
             staging_dir/host
             bin/packages
-          key: ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', '.ci-source-commit') }}-${{ github.run_id }}
+          key: ponwrt-tree-${{ inputs.device }}-extra-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'package/**', 'target/linux/**') }}-${{ github.run_id }}
 
       - name: Stage host apk tool for the publish workflow
         if: always()
