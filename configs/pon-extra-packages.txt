@@ -32,10 +32,9 @@ package/feeds/homeproxy/luci-app-homeproxy|luci-app-homeproxy|required
 package/feeds/packages/ksmbd-tools|ksmbd-tools|required
 package/feeds/luci/luci-app-ksmbd|luci-app-ksmbd|required
 
-# ---- OpenAppFilter（内核侧 kmod-oaf 由固件流编，这里只编用户态）----
-# appfilter 不进包流：它的 Makefile 第 40 行用 $(KERNEL_MAKE) 在同一目录编 oaf.ko，
-# 属于「需要内核源码树」的包（incremental 的 preflight 会直接拒绝）。改由固件流编，
-# 见 configs/features/kmod-repo.config 的 CONFIG_PACKAGE_appfilter=m。
+# ---- OpenAppFilter 界面（appfilter 用户态与 kmod-oaf 都不在这里）----
+# appfilter 已移交 incremental 包流（B 案）：包流摘掉 +kmod-oaf 与 Makefile 里的
+# oaf.ko 编译段，只出用户态 apk；kmod-oaf 由固件流编。这里只编 LuCI 界面。
 package/feeds/oaf/luci-app-oaf|luci-app-oaf|required
 
 # ---- OpenClash / SQM：不进固件镜像，只出独立 apk
