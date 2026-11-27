@@ -805,8 +805,22 @@ jobs:
             # "No rule to make target .../.config"。整段定义和它的 eval 一行一起删掉。
             sed -i '/^define KernelPackage\//,/^endef/d' "$mk"
             sed -i '/^\$(eval \$(call KernelPackage,/d' "$mk"
-            if grep -q 'KERNEL_MAKE' "$mk"; then
-              printf '\nBuild/Compile=$(call Build/Compile/Default)\n' >> "$mk"
+            # kernel.mk 自带 `-include $(LINUX_DIR)/.config`，且它的 KernelPackage 机制会把内核树
+            # .config 变成 .built 的前置依赖。包流没有内核源码，光删 KernelPackage 段不够，
+            # 必须把 include kernel.mk 一起摘掉（r89 实证：删段后仍报 No rule to make target
+            # .../linux-6.18.60/.config, needed by .../.built）。
+            sed -i '\#^include \$(INCLUDE_DIR)/kernel.mk#d' "$mk"
+            # 含 KERNEL_MAKE 的 Build/Compile 定义块整体丢弃，再在 BuildPackage 之前补默认用户态编译，
+            # 保证 eval 时拿到的是 $(call Build/Compile/Default)，而不是残留的 oaf.ko 编译段。
+            awk '
+              /^define Build\/Compile/ { inblk=1; buf=$0 "\n"; next }
+              inblk { buf=buf $0 "\n"; if ($0 ~ /^endef/) { inblk=0; if (buf !~ /KERNEL_MAKE/) printf "%s", buf; buf="" } next }
+              { print }
+              END { if (inblk) printf "%s", buf }
+            ' "$mk" > "$mk.stripped" && mv "$mk.stripped" "$mk"
+            awk '{ if (!done && $0 ~ /\$\(eval \$\(call BuildPackage,/) { print "Build/Compile=$(call Build/Compile/Default)"; done=1 } print }' "$mk" > "$mk.stripped" && mv "$mk.stripped" "$mk"
+            if grep -q 'KernelPackage\|KERNEL_MAKE\|include \$(INCLUDE_DIR)/kernel.mk' "$mk"; then
+              echo "::warning::$mk 剥离后仍有内核依赖残留，请检查"
             fi
             echo ">>> 已改写 $mk：删掉内联 KernelPackage 段、摘掉 +kmod-*，Build/Compile 回落到默认用户态编译"
           }
