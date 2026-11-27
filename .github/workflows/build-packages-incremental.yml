@@ -1,4 +1,4 @@
-name: Build Packages (userland only, incremental) manual
+name: PonWrt 软件包编译（用户态增量）
 
 # ==============================================================================
 # 只允许手动触发（workflow_dispatch）：无 push / schedule 触发。
@@ -70,7 +70,7 @@ env:
 
 jobs:
   packages:
-    name: Build packages (${{ inputs.device }})
+    name: 编译用户态增量包（${{ inputs.device }}）
     runs-on: ubuntu-24.04
     timeout-minutes: 420
     permissions:

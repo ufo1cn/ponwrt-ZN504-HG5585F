@@ -1,4 +1,4 @@
-name: Build Packages (legacy | 旧仓有、新仓无的用户态软件) manual
+name: PonWrt 软件包编译（旧仓遗留）
 
 # ==============================================================================
 # 只允许手动触发（workflow_dispatch）。
@@ -75,7 +75,7 @@ on:
 
 jobs:
   build:
-    name: Build legacy packages (${{ inputs.device }})
+    name: 编译遗留包（${{ inputs.device }}）
     runs-on: ubuntu-latest
     permissions:
       contents: write
