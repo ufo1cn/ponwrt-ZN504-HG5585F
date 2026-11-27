@@ -61,12 +61,23 @@ MISS=0			# 连续"无人"次数
 
 start_ring() {
 	[ -n "$FF" ] || return 1
-	# -c copy：MJPEG 帧原样封装，几乎不吃 CPU
+	# 音视频取流：视频恒取第一条（-map 0:v:0），避免多路视频时默认挑到子码流；
+	# 音频按 record_audio：1=有麦克风就一起录（-map 0:a:0? 的 ? 表示无音轨不报错），
+	# 0=只录视频（-an，省空间，也规避个别机型音轨时间戳错乱）。
+	RA=$(val record_audio 1)
+	if [ "$RA" = "0" ]; then
+		AMAP="-map 0:v:0 -an"
+		AMODE="仅视频"
+	else
+		AMAP="-map 0:v:0 -map 0:a:0?"
+		AMODE="视频+音频（有音轨才带）"
+	fi
+	# -c copy：帧原样封装，不转码，几乎不吃 CPU
 	"$FF" -nostdin -loglevel error -rtsp_transport tcp -i "$RTSP_URL" \
-		-c copy -f segment -segment_time "$SEG" -segment_wrap "$RING" \
+		$AMAP -c copy -f segment -segment_time "$SEG" -segment_wrap "$RING" \
 		-reset_timestamps 1 "$DIR/ring/seg_%03d.mkv" &
 	RING_PID=$!
-	log "环形录制已启动 pid=$RING_PID 片长=${SEG}s 片数=$RING"
+	log "环形录制已启动 pid=$RING_PID 片长=${SEG}s 片数=$RING 模式=$AMODE"
 }
 
 stop_ring() {
