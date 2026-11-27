@@ -5,7 +5,7 @@
 
 # ---- 自有用户态应用 ----
 package/luci-app-iptvscan|luci-app-iptvscan|required
-package/luci-app-ponwrt-update|luci-app-ponwrt-update|required
+# luci-app-ponwrt-update 由固件内置（release.config =y），不再重复出 apk
 package/pon-userspace/camlive|camlive|required
 package/pon-userspace/go2rtc|go2rtc|required
 package/pon-userspace/gensio|gensio|required
@@ -19,6 +19,10 @@ package/pon-userspace/triggerhappy|triggerhappy|required
 package/pon-userspace/luci-app-audiorec|luci-app-audiorec|required
 # LuCI 概览温度行取数脚本：不内置，随包流出独立 apk（装上去才会显示温度行）
 package/pon-userspace/tempinfo|tempinfo|required
+
+# ---- 仓库根自带源码（lucky 为上游预编译二进制下载，无 kmod 依赖）----
+package/lucky|lucky|required
+package/luci-app-lucky|luci-app-lucky|required
 
 # ---- 蓝牙音频（自建包，源码来自上游 arkq/bluez-alsa）----
 package/pon-userspace/bluez-alsa|bluez-alsa|required
