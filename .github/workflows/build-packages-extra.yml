@@ -263,6 +263,7 @@ jobs:
           # 全部失配，装上去不能正常运行。因此这类包只能随固件一起编（fw-build.yml），
           # 不许进包流程。
           hits=""
+          defused=""
           for manifest in configs/pon-*.txt; do
             [ -f "$manifest" ] || continue
             while IFS='|' read -r path apk required; do
@@ -276,15 +277,29 @@ jobs:
               fi
               [ -n "$dir" ] && [ -f "$dir/Makefile" ] || continue
               hit=""
-              for pat in '$(LINUX_DIR)' '${LINUX_DIR}' '$(LINUX_KARCH)' 'vmlinux' 'KERNEL_MAKE'; do
+              for pat in '$(LINUX_DIR)' '${LINUX_DIR}' '$(LINUX_KARCH)' 'vmlinux'; do
                 line=$(grep -nF -- "$pat" "$dir/Makefile" 2>/dev/null | head -n 2 || true)
                 [ -n "$line" ] && hit="${hit}      ${pat}: ${line}\n"
               done
+              # KERNEL_MAKE 例外：只有「+$(KERNEL_MAKE) ... modules」这种整段可摘除的形态放行
+              # （open-app-filter 的 oaf.ko 由它自己的 Makefile 顺手编，摘除动作在 incremental
+              # 的 Strip 步骤里；本流不编它，这里只是别让清单里的它把 preflight 卡红）。
+              if grep -q 'KERNEL_MAKE' "$dir/Makefile"; then
+                if grep -qE '^[[:space:]]*\+\$(KERNEL_MAKE)' "$dir/Makefile"; then
+                  defused="${defused}  ${apk} (${dir})\n"
+                else
+                  hit="${hit}      KERNEL_MAKE: $(grep -nF 'KERNEL_MAKE' "$dir/Makefile" | head -n 2)\n"
+                fi
+              fi
               if [ -n "$hit" ]; then
                 hits="${hits}  ${manifest} :: ${apk} (${dir})\n${hit}"
               fi
             done < "$manifest"
           done
+          if [ -n "$defused" ]; then
+            echo ">>> 预检放行（内核编译段由 incremental 包流摘除）："
+            echo -e "$defused"
+          fi
           if [ -n "$hits" ]; then
             echo "::error::清单内存在需要内核源码树的包，必须随固件（fw-build）编译，不能进包流程："
             echo -e "$hits"
