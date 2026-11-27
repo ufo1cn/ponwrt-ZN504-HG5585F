@@ -489,11 +489,28 @@ jobs:
           # 只删 tmp/.packageinfo 时，prepare-tmpinfo 的 scan_unchanged 会走「未变化」快
           # 路径、不重新 dump，于是 .config-package.in 变成空壳 → 清单包符号全部判缺
           #（incremental #68 实证）。这里显式 prepare-tmpinfo + oldconfig，并硬门控定义数。
-          rm -rf tmp/info tmp/.packageinfo tmp/.packagedeps tmp/.config-package.in \
-                 tmp/.config-feeds.in tmp/.config-target.in
+          # 关键：不能删掉整个 tmp/info 目录。scan.mk 要在 tmp/info 下新建
+          # .overrides-*/ .files-*/ .packageinfo-* 片段，目录不存在时 touch/find 失败、
+          # FILELIST 为空，tmp/.packageinfo 被写成空文件（退出码仍 0）→ PACKAGE 定义 0 个
+          #（incremental #69 实证：prepare-tmpinfo “成功”但定义数 0）。
+          # 正确做法：保留目录，只清陈旧缓存与 stamp，让 scan.mk 全量重扫。
+          rm -rf tmp/info && mkdir -p tmp/info
+          rm -f tmp/.packageinfo tmp/.packagedeps tmp/.packageauxvars \
+                tmp/.packageusergroup tmp/.config-package.in \
+                tmp/.config-feeds.in tmp/.config-target.in
           timeout 1800 bash -c 'make -s prepare-tmpinfo' >/tmp/pkg-tmpinfo.log 2>&1 || {
             tail -n 40 /tmp/pkg-tmpinfo.log
             echo "::error::prepare-tmpinfo 失败（包元数据无法重建）"
+            exit 1
+          }
+          pkgmeta_lines=$(wc -l < tmp/.packageinfo 2>/dev/null || echo 0)
+          echo ">>> tmp/.packageinfo 行数 ${pkgmeta_lines}"
+          [ "${pkgmeta_lines:-0}" -ge 10000 ] || {
+            echo "--- prepare-tmpinfo 日志尾部"
+            tail -n 60 /tmp/pkg-tmpinfo.log 2>/dev/null || true
+            echo "--- tmp/info 现场"
+            ls -l tmp/info 2>/dev/null | tail -n 20 || true
+            echo "::error::包扫描未生效（tmp/.packageinfo 仅 ${pkgmeta_lines:-0} 行，scan.mk 未真正扫描）"
             exit 1
           }
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-rebuild.log 2>&1 || {
