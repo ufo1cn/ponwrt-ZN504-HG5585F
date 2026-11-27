@@ -642,6 +642,21 @@ jobs:
               -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
             n=$((n+1))
           done
+          # 缓存可能「有 stamp 无实物」：staging_dir/host/stamp/.libtool_installed 在，但
+          # share/aclocal/libtool.m4 或 bin/ 下的工具没了 → automake/autoreconf 直接挂，
+          # 表现为 flex（Makefile.in 重生成失败）/ fakeroot（LIBTOOL undefined）稳定暴红。
+          # 缺关键文件就整层重编一次（约 15 分钟；修好后缓存即完整，后续照常跳过）。
+          miss=""
+          for b in flex bison m4 autoconf automake libtool pkgconf cmake ninja meson patch tar sed zstd fakeroot; do
+            [ -x "staging_dir/host/bin/$b" ] || miss="$miss $b"
+          done
+          [ -f staging_dir/host/share/aclocal/libtool.m4 ] || miss="$miss libtool.m4"
+          if [ -n "$miss" ]; then
+            echo "::warning::host tools 缓存不完整，缺:$miss；清掉 host 层重编"
+            ls -la staging_dir/host/share/aclocal 2>/dev/null | head -n 10 || true
+            rm -rf build_dir/host staging_dir/host
+            mkdir -p staging_dir/host
+          fi
           echo ">>> 时间戳归一：${n} 个目录已归一（stamp=2035、源文件=2026-06-01，make 才会跳过已编产物）"
 
       - name: Build host tools and toolchain
