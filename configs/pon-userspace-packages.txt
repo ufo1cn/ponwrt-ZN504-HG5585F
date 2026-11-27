@@ -69,3 +69,5 @@ package/feeds/packages/alsa-utils|alsa-utils|required
 # 该 Makefile 用 $(KERNEL_MAKE) 在同一份文件里编 oaf.ko，包流编译前会把那两行摘掉，
 # 并把 DEPENDS 里的 +kmod-oaf 摘掉，只产出用户态 apk。
 package/feeds/packages/open-app-filter|appfilter|required
+# LuCI 界面（DEPENDS +appfilter +luci-compat）：只作为独立包发布，不进固件镜像。
+package/feeds/luci/luci-app-appfilter|luci-app-appfilter|required
