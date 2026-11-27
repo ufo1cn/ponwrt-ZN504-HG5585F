@@ -64,3 +64,8 @@ package/feeds/packages/tailscale|tailscale|required
 package/feeds/packages/cifs-utils|cifsmount|required
 package/feeds/packages/alsa-lib|alsa-lib|required
 package/feeds/packages/alsa-utils|alsa-utils|required
+
+# ---- OpenAppFilter 用户态（内核侧 kmod-oaf 由固件流编）----
+# 该 Makefile 用 $(KERNEL_MAKE) 在同一份文件里编 oaf.ko，包流编译前会把那两行摘掉，
+# 并把 DEPENDS 里的 +kmod-oaf 摘掉，只产出用户态 apk。
+package/feeds/packages/open-app-filter|appfilter|required

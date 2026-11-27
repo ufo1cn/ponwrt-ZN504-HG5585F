@@ -212,6 +212,7 @@ jobs:
           # 全部失配，装上去不能正常运行。因此这类包只能随固件一起编（fw-build.yml），
           # 不许进包流程。
           hits=""
+          defused=""
           for manifest in configs/pon-*.txt; do
             [ -f "$manifest" ] || continue
             while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
@@ -225,15 +226,30 @@ jobs:
               fi
               [ -n "$dir" ] && [ -f "$dir/Makefile" ] || continue
               hit=""
-              for pat in '$(LINUX_DIR)' '${LINUX_DIR}' '$(LINUX_KARCH)' 'vmlinux' 'KERNEL_MAKE'; do
+              for pat in '$(LINUX_DIR)' '${LINUX_DIR}' '$(LINUX_KARCH)' 'vmlinux'; do
                 line=$(grep -nF -- "$pat" "$dir/Makefile" 2>/dev/null | head -n 2 || true)
                 [ -n "$line" ] && hit="${hit}      ${pat}: ${line}\n"
               done
+              # KERNEL_MAKE 例外：只在「+$(KERNEL_MAKE) ... M="..." modules」这种整段可摘除的
+              # 形态才放行（open-app-filter 的 oaf.ko 就是它自己的 Makefile 顺手编的）。
+              # 真正要编内核状态模块（读 LINUX_DIR/KARCH）的包仍然在这里被拒。
+              # 摘除动作在后面的 Strip 步骤里做（会硬校验 KERNEL_MAKE 已不存在）。
+              if grep -q 'KERNEL_MAKE' "$dir/Makefile"; then
+                if grep -qE '^[[:space:]]*\+\$(KERNEL_MAKE)' "$dir/Makefile"; then
+                  defused="${defused}  ${apk} (${dir})\n"
+                else
+                  hit="${hit}      KERNEL_MAKE: $(grep -nF 'KERNEL_MAKE' "$dir/Makefile" | head -n 2)\n"
+                fi
+              fi
               if [ -n "$hit" ]; then
                 hits="${hits}  ${manifest} :: ${apk} (${dir})\n${hit}"
               fi
             done < "$manifest"
           done
+          if [ -n "$defused" ]; then
+            echo ">>> 预检放行（编译前会摘除 Makefile 里的内核编译段）："
+            echo -e "$defused"
+          fi
           if [ -n "$hits" ]; then
             echo "::error::清单内存在需要内核源码树的包，必须随固件（fw-build）编译，不能进包流程："
             echo -e "$hits"
@@ -352,6 +368,19 @@ jobs:
               case "$path" in \#*) continue ;; esac
               [ -f "$path/Makefile" ] || continue
               hits=$(sed -n -e '/^[[:space:]]*#/!p' "$path/Makefile" | grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)' | sed 's/^+//' | sort -u || true)
+              # 有些包的 Makefile 用 $(KERNEL_MAKE) 在同一份文件里编内核模块（open-app-filter
+              # 就是：+$(KERNEL_MAKE) ... M="$(PKG_BUILD_DIR)/oaf/src" modules）。包流没有内核
+              # 构建产物，这段必须摘掉，只留 $(call Build/Compile/Default) 的用户态编译；
+              # oaf.ko 本体由固件流以 kmod-oaf apk 出。摘不掉就直接失败，避免又拉起内核链。
+              if grep -q 'KERNEL_MAKE' "$path/Makefile"; then
+                cp -f "$path/Makefile" "/tmp/kernelmk-$(echo "$apk" | tr '/' '_').bak"
+                sed -i -E '/^[[:space:]]*\+\$\(KERNEL_MAKE\)/{N;d}' "$path/Makefile"
+                if grep -q 'KERNEL_MAKE' "$path/Makefile"; then
+                  echo "::error::$apk 的 Makefile 仍有 KERNEL_MAKE 编译段（形态与预期不符），拒绝在包流编它"
+                  exit 1
+                fi
+                echo ">>> 已摘除 $apk 的 Makefile 内核编译段（内核模块由固件流程编）"
+              fi
               [ -n "$hits" ] || continue
               sed -i -E '/^[[:space:]]*#/! s/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$path/Makefile"
               sed -i -E '/^[[:space:]]*DEPENDS/ s/[[:space:]]+/ /g; /^[[:space:]]*DEPENDS/ s/[[:space:]]+$//' "$path/Makefile"
