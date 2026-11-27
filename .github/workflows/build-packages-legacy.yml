@@ -412,7 +412,11 @@ jobs:
             echo "::error::包元数据同步失败（oldconfig）"
             exit 1
           }
-          pkgdefs=$(grep -cE '^config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
+          # package-metadata.pl 输出的包定义行是 "\tconfig PACKAGE_x"（带一个 TAB 缩进），
+          # 用 '^config PACKAGE_' 匹配永远 0 条（#68/#69/#20 的“符号全缺/定义 0 个”都是这个正则假警报）。
+          # Kconfig 里缩进无语义，直接把行首缩进抹平，后面所有 ^config PACKAGE_ 判断与 awk 块提取才成立。
+          sed -i -E 's/^[[:space:]]+config PACKAGE_/config PACKAGE_/' tmp/.config-package.in 2>/dev/null || true
+          pkgdefs=$(grep -cE '^[[:space:]]*config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
           echo ">>> 包元数据重建：PACKAGE 定义 ${pkgdefs:-0} 个"
           [ "${pkgdefs:-0}" -ge 5000 ] || {
             echo "::error::包元数据重建后定义过少（${pkgdefs:-0}），feeds 扫描未生效"
@@ -431,8 +435,8 @@ jobs:
           echo ">>> 剩余选择 kmod=${left_kmod:-0} kernel=${left_kernel:-0} gpio-button-hotplug=${left_gpio:-0}"
           [ "${left_kmod:-0}" -eq 0 ] && [ "${left_kernel:-0}" -eq 0 ] && [ "${left_gpio:-0}" -eq 0 ] \
             || { echo "::error::.config 里仍有 kmod/kernel 包选择，会触发内核编译"; exit 1; }
-          if grep -qE '^config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in 2>/dev/null; then
-            grep -nE '^config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in || true
+          if grep -qE '^[[:space:]]*config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in 2>/dev/null; then
+            grep -nE '^[[:space:]]*config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in || true
             echo "::error::包元数据里仍有 kernel/gpio-button-hotplug 定义，会触发内核编译"
             exit 1
           fi
