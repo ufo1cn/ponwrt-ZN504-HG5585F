@@ -1,4 +1,4 @@
-name: Publish packages to apk repository
+name: PonWrt 软件包发布（写入软仓库）
 # 把三条包构建工作流（incremental / legacy / extra）产出的 apk 统一搬进
 # ufo1cn/ponwrt-apk-repo 的 repo 分支，按 ponwrt-k<kver>/<能力>/ 落位，并重建签名索引。
 # 构建工作流本身不再 push apk-repo（避免三处各写一份推送/索引逻辑）。
@@ -78,13 +78,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout source (configs / 内核版本推断)
+      - name: 检出源码（configs 与内核版本推断）
         uses: actions/checkout@v4
         with:
           # 能力归类表与内核版本要按索引分支的源码树取：repo-wed 用 WED 分支
           ref: ${{ inputs.idx_branch == 'repo-wed' && 'feat/wed-npu-offload-6.18' || github.ref }}
 
-      - name: Resolve publish plan
+      - name: 解析发布计划
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEV: ${{ inputs.device }}
@@ -204,7 +204,7 @@ jobs:
           echo ">>> plan:"
           cat /tmp/plan.json
 
-      - name: Install fixed apk signing key
+      - name: 安装固定 apk 签名私钥
         env:
           APK_SIGNING_PRIVATE_KEY: ${{ secrets.APK_SIGNING_PRIVATE_KEY }}
         run: |
@@ -223,7 +223,7 @@ jobs:
             exit 1
           fi
 
-      - name: Download artifacts
+      - name: 下载 Artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -239,7 +239,7 @@ jobs:
           done < <(jq -c '.[]' /tmp/plan.json)
           find in -maxdepth 3 -type d | sort
 
-      - name: Verify signing key and package signatures
+      - name: 校验签名私钥与包签名
         run: |
           set -uo pipefail
           shopt -s nullglob
@@ -295,7 +295,7 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve kernel version
+      - name: 解析内核版本
         id: kver
         env:
           KVER_IN: ${{ inputs.kver }}
@@ -311,7 +311,7 @@ jobs:
           echo ">>> 目标目录 ponwrt-k$KVER"
           echo "kver=$KVER" >> "$GITHUB_OUTPUT"
 
-      - name: Stage apks by device capability
+      - name: 按机型能力归类 apk
         run: |
           set -uo pipefail
           # 注意：这里绝不能开 nullglob。归类表里写的是通配符本身（kmod-usb-*），
@@ -391,7 +391,7 @@ jobs:
           fi
           exit $fail
 
-      - name: Publish to apk repository
+      - name: 发布到软仓
         if: inputs.dry_run != true
         env:
           GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
@@ -508,7 +508,7 @@ jobs:
           fi
           echo ">>> 已发布：https://github.com/$DST_REPO/tree/$IDX_BRANCH/aarch64_cortex-a53/ponwrt-k${KVER}"
 
-      - name: Summary
+      - name: 汇总
         if: always()
         run: |
           {
