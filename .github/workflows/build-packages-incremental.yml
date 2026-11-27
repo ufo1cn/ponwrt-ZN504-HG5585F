@@ -215,7 +215,7 @@ jobs:
           defused=""
           for manifest in configs/pon-*.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required || [ -n "\" ]; do
+            while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               dir="$path"
@@ -363,7 +363,7 @@ jobs:
           touched=0
           for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required || [ -n "\" ]; do
+            while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               [ -f "$path/Makefile" ] || continue
@@ -904,7 +904,7 @@ jobs:
           }
 
 
-          while IFS='|' read -r path apk required || [ -n "\" ]; do
+          while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
             if [ "$only" != "all" ]; then
