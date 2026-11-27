@@ -146,6 +146,7 @@ jobs:
             build_dir/host
             staging_dir/target-*
             staging_dir/host
+            bin/packages
           key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-${{ github.run_id }}
           restore-keys: |
             ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-
@@ -629,6 +630,76 @@ jobs:
           grep -q "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_" .config \
             || { echo "::error::oldconfig 之后机型行丢了"; exit 1; }
           echo ">>> =m 符号数：$(grep -c '^CONFIG_PACKAGE_.*=m' .config || true)"
+          # ------------------------------------------------------------------
+          # 批量编译：把「一个包一次 make」改成「一批包一次 make」。
+          # 每次 make 都要重新解析整棵树（feeds 扫描 -> tmp/.packageinfo -> 依赖图），
+          # 空转 30-60 秒；清单 29-37 个包 = 20-35 分钟纯启动开销，跟真实编译无关。
+          # 增量：bin/packages 已随 tree cache 一起恢复，已编好的包 make 自己会跳过；
+          # 这里再按 apk 哈希判定 REUSE，汇报里能区分「本轮真编」与「沿用上轮产物」。
+          # ------------------------------------------------------------------
+          BATCH="${BATCH_SIZE:-8}"
+          bt_path=(); bt_apk=(); bt_apkf=()
+          batch_no=0
+          : > /tmp/prebuilt.txt
+          if [ -d bin/packages ]; then
+            ( cd bin/packages && find . -type f -name '*.apk' -exec sha256sum {} + ) >> /tmp/prebuilt.txt 2>/dev/null || true
+          fi
+          echo ">>> 缓存里已有 apk $(wc -l < /tmp/prebuilt.txt) 个（已编好的包不重编，直接复用）"
+
+          apk_of() { find bin/packages bin/targets -type f -name "$1-[0-9]*.apk" 2>/dev/null | head -n 1; }
+
+          collect_one() {  # $1=apk 文件名基  $2=包名
+            local apkf="$1" apk="$2" hit sha tag
+            hit=$(apk_of "$apkf")
+            if [ -z "$hit" ]; then
+              echo "::error::$apk 编译命令成功但没有产出 apk"
+              summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
+              return 1
+            fi
+            sha=$(sha256sum "$hit" | awk '{print $1}')
+            if grep -q "^$sha" /tmp/prebuilt.txt 2>/dev/null; then tag="REUSE"; else tag="BUILD"; fi
+            cp -f "$hit" output/
+            summary="${summary}\nOK[$tag] $apk -> $hit"
+            echo ">>> OK[$tag] $apk -> $hit"
+          }
+
+          flush_batch() {
+            if [ "${#bt_path[@]}" -eq 0 ]; then return 0; fi
+            local targets=() i
+            for i in "${!bt_path[@]}"; do targets+=("${bt_path[$i]}/compile"); done
+            batch_no=$((batch_no+1))
+            echo ">>> 批量编译 ${#bt_path[@]} 个包（batch-${batch_no}）：${bt_apk[*]}"
+            if make -j"$(nproc)" "${targets[@]}" > "build_log/batch-${batch_no}.log" 2>&1; then
+              for i in "${!bt_apk[@]}"; do collect_one "${bt_apkf[$i]}" "${bt_apk[$i]}"; done
+            else
+              echo ">>> batch-${batch_no} 内有失败，逐包复跑定位（日志 build_log/batch-${batch_no}.log）"
+              for i in "${!bt_path[@]}"; do build_one "${bt_path[$i]}" "${bt_apk[$i]}" "${bt_apkf[$i]}"; done
+            fi
+            bt_path=(); bt_apk=(); bt_apkf=()
+          }
+
+          build_one() {
+            local path="$1" apk="$2" real="$3"
+            if make -j"$(nproc)" "$path/compile" 2>&1 | tee "build_log/${apk}.log"; then
+              hit=$(find bin/packages bin/targets -type f -name "${real}-[0-9]*.apk" | head -n1)
+              if [ -z "$hit" ] && [ "$real" != "$apk" ]; then
+                hit=$(find bin/packages bin/targets -type f -name "${apk}-[0-9]*.apk" | head -n1)
+              fi
+              if [ -n "$hit" ]; then
+                summary="${summary}\nOK     $apk -> $hit"
+                cp -f "$hit" output/
+              else
+                echo "::error::$apk 编译命令成功但没有产出 apk"
+                summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
+              fi
+            else
+              echo "::error::$apk 编译失败，日志 build_log/${apk}.log"
+              { echo; echo ">>> 用 -j1 V=s 复跑取尾部 100 行"; \
+                make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "build_log/${apk}.log" || true
+              summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
+            fi
+          }
+
           touch build_log/.loopstart
           while IFS='|' read -r path apk required || [ -n "${path:-}" ]; do
             [ -n "${path:-}" ] || continue
@@ -683,26 +754,11 @@ jobs:
               fi
             fi
 
-            echo ">>> 编译 $apk ($path)"
-            if make -j"$(nproc)" "$path/compile" 2>&1 | tee "build_log/${apk}.log"; then
-              hit=$(find bin/packages bin/targets -type f -name "${real}-[0-9]*.apk" | head -n1)
-              if [ -z "$hit" ] && [ "$real" != "$apk" ]; then
-                hit=$(find bin/packages bin/targets -type f -name "${apk}-[0-9]*.apk" | head -n1)
-              fi
-              if [ -n "$hit" ]; then
-                summary="${summary}\nOK     $apk -> $hit"
-                cp -f "$hit" output/
-              else
-                echo "::error::$apk 编译命令成功但没有产出 apk"
-                summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
-              fi
-            else
-              echo "::error::$apk 编译失败，日志 build_log/${apk}.log"
-              { echo; echo ">>> 用 -j1 V=s 复跑取尾部 100 行"; \
-                make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "build_log/${apk}.log" || true
-              summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
-            fi
+            echo ">>> 入批 $apk ($path)（真实包名 ${real}）"
+            bt_path+=("$path"); bt_apk+=("$apk"); bt_apkf+=("$real")
+            if [ "${#bt_path[@]}" -ge "$BATCH" ]; then flush_batch; fi
           done < "$manifest"
+          flush_batch
 
           # 依赖包（libavcodec / libz / avahi 库 …）也要进产物，否则主包 apk 在设备上装不上。
           # 用循环前的时间戳界定「本次新编出来的 apk」，全部收进 output（同名覆盖去重）。
@@ -797,6 +853,7 @@ jobs:
             build_dir/host
             staging_dir/target-*
             staging_dir/host
+            bin/packages
           key: ponwrt-tree-${{ inputs.device }}-legacy-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', '.ci-source-commit') }}-${{ github.run_id }}
 
       - name: Stage host apk tool for the publish workflow

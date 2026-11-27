@@ -154,6 +154,7 @@ jobs:
             build_dir/host
             staging_dir/target-*
             staging_dir/host
+            bin/packages
           key: ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-${{ github.run_id }}
           # 只复用「同一源码 commit + 同一配置」的树：跨 commit 复用会把别的内核的
           # build_dir/staging_dir 拉回来，正是 kmod ABI 对不上的一大来源
@@ -421,7 +422,7 @@ jobs:
             dep_skip "$d_sym" && return 0
             grep -qxF "$d_sym" /tmp/sel-seen.txt 2>/dev/null && return 0
             echo "$d_sym" >> /tmp/sel-seen.txt
-            if ! grep -qx "config PACKAGE_${d_sym}" tmp/.config-package.in 2>/dev/null; then
+            if ! grep -qE "^config PACKAGE_${d_sym}[[:space:]]*$" tmp/.config-package.in 2>/dev/null; then
               echo ">>> 依赖符号不在包元数据里，跳过：${d_sym}"
               return 0
             fi
@@ -471,7 +472,11 @@ jobs:
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-sel2.log 2>&1 || true
           meta_miss=""
           for s in $sym_list; do
-            grep -qx "config PACKAGE_${s}" tmp/.config-package.in || meta_miss="$meta_miss $s"
+            if ! grep -qE "^config PACKAGE_${s}[[:space:]]*$" tmp/.config-package.in; then
+              meta_miss="$meta_miss $s"
+              echo ">>> [diag] ${s} 未精确命中，近似行（cat -A 看隐藏字符）："
+              grep -n "PACKAGE_${s}" tmp/.config-package.in 2>/dev/null | head -n 5 | cat -A || true
+            fi
           done
           if [ -n "$meta_miss" ]; then
             echo ">>> 包元数据缺这些清单包符号，强制全量重扫：${meta_miss}"
@@ -484,7 +489,11 @@ jobs:
             }
             meta_miss=""
             for s in $sym_list; do
-              grep -qx "config PACKAGE_${s}" tmp/.config-package.in || meta_miss="$meta_miss $s"
+              if ! grep -qE "^config PACKAGE_${s}[[:space:]]*$" tmp/.config-package.in; then
+              meta_miss="$meta_miss $s"
+              echo ">>> [diag] ${s} 未精确命中，近似行（cat -A 看隐藏字符）："
+              grep -n "PACKAGE_${s}" tmp/.config-package.in 2>/dev/null | head -n 5 | cat -A || true
+            fi
             done
             [ -z "$meta_miss" ] || { echo "::error::清单包符号始终不在包元数据里（Makefile 未扫描到或 dump 失败）:${meta_miss}"; exit 1; }
           fi
@@ -580,6 +589,126 @@ jobs:
           cat build_log/scan-diag.txt || true
 
           only="${{ inputs.only }}"
+          # ------------------------------------------------------------------
+          # 批量编译：把「一个包一次 make」改成「一批包一次 make」。
+          # 每次 make 都要重新解析整棵树（feeds 扫描 -> tmp/.packageinfo -> 依赖图），
+          # 空转 30-60 秒；清单 29-37 个包 = 20-35 分钟纯启动开销，跟真实编译无关。
+          # 增量：bin/packages 已随 tree cache 一起恢复，已编好的包 make 自己会跳过；
+          # 这里再按 apk 哈希判定 REUSE，汇报里能区分「本轮真编」与「沿用上轮产物」。
+          # ------------------------------------------------------------------
+          BATCH="${BATCH_SIZE:-8}"
+          bt_path=(); bt_apk=(); bt_apkf=()
+          batch_no=0
+          : > /tmp/prebuilt.txt
+          if [ -d bin/packages ]; then
+            ( cd bin/packages && find . -type f -name '*.apk' -exec sha256sum {} + ) >> /tmp/prebuilt.txt 2>/dev/null || true
+          fi
+          echo ">>> 缓存里已有 apk $(wc -l < /tmp/prebuilt.txt) 个（已编好的包不重编，直接复用）"
+
+          apk_of() { find bin/packages bin/targets -type f -name "$1-[0-9]*.apk" 2>/dev/null | head -n 1; }
+
+          collect_one() {  # $1=apk 文件名基  $2=包名
+            local apkf="$1" apk="$2" hit sha tag
+            hit=$(apk_of "$apkf")
+            if [ -z "$hit" ]; then
+              echo "::error::$apk 编译命令成功但没有产出 apk"
+              summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
+              return 1
+            fi
+            sha=$(sha256sum "$hit" | awk '{print $1}')
+            if grep -q "^$sha" /tmp/prebuilt.txt 2>/dev/null; then tag="REUSE"; else tag="BUILD"; fi
+            cp -f "$hit" output/
+            summary="${summary}\nOK[$tag] $apk -> $hit"
+            echo ">>> OK[$tag] $apk -> $hit"
+          }
+
+          flush_batch() {
+            if [ "${#bt_path[@]}" -eq 0 ]; then return 0; fi
+            local targets=() i
+            for i in "${!bt_path[@]}"; do targets+=("${bt_path[$i]}/compile"); done
+            batch_no=$((batch_no+1))
+            echo ">>> 批量编译 ${#bt_path[@]} 个包（batch-${batch_no}）：${bt_apk[*]}"
+            if make -j"$(nproc)" "${targets[@]}" > "build_log/batch-${batch_no}.log" 2>&1; then
+              for i in "${!bt_apk[@]}"; do collect_one "${bt_apkf[$i]}" "${bt_apk[$i]}"; done
+            else
+              echo ">>> batch-${batch_no} 内有失败，逐包复跑定位（日志 build_log/batch-${batch_no}.log）"
+              for i in "${!bt_path[@]}"; do build_one "${bt_path[$i]}" "${bt_apk[$i]}" "${bt_apkf[$i]}"; done
+            fi
+            bt_path=(); bt_apk=(); bt_apkf=()
+          }
+
+          build_one() {
+            local path="$1" apk="$2" apkf="$3"
+            log="build_log/${apk}.log"
+            sym=$(pkg_sym_for "$apk")
+            ok=0
+            # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
+            # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
+            : > "$log"
+            # 诊断：ser2net 这种「purge 干净了仍 0.0x 秒跳打包」的情况，要先确认该包
+            # 在 .config 与包元数据里是真的存在；不在的话 compile 只是空转，打包必然报
+            # cp: cannot stat .../ipkg-install/...
+            {
+              echo "--- 配置检查 $apk（符号 ${sym}）："
+              grep -n "^CONFIG_PACKAGE_${sym}=" .config || echo "    .config 无 CONFIG_PACKAGE_${sym}"
+              if [ -f tmp/.packageinfo ]; then
+                echo -n "    .packageinfo 记录数: "; grep -c "^Package: ${sym}$" tmp/.packageinfo || true
+                awk -v p="$sym" '/^Package: /{cur=$2} cur==p && /^Depends: /{print "    depends: "$0; exit}' tmp/.packageinfo || true
+              else
+                echo "    tmp/.packageinfo 不存在"
+              fi
+            } >> "$log" 2>&1 || true
+            # 缓存树可能「stamp 在、build_dir/ipkg-install 不在」，这种包无论 only 取
+            # 什么值都必须先清干净，否则 make 直接跳到打包阶段（run 44830801575 的 ser2net）。
+            bd=""
+            for cand in build_dir/target-*/"$(basename "$path")" build_dir/target-*/"$(basename "$path")"-*; do
+              [ -e "$cand" ] && { bd="$cand"; break; }
+            done
+            if [ -z "$bd" ] || [ ! -d "$bd/ipkg-install" ]; then
+              echo ">>> 预先清理 $apk 的历史构建状态（build_dir=${bd:-无}）" >> "$log"
+              purge_pkg "$path" "$apkf" "$log"
+            fi
+            # 首轮就用 V=s：非 verbose 时包内 prepare/configure/build 的实际动作不可见，
+            # 只剩一句 ERROR: package/... failed to build，定位不了「为什么直接跳打包」。
+            if make -j"$(nproc)" V=s "$path/compile" 2>&1 | tee -a "$log"; then
+              ok=1
+            else
+              # 首轮失败：用 make -pn 探测真实 stamp 路径并精确删除，再编一次
+              echo "" >> "$log"
+              echo ">>> 首轮失败：探测 STAMP_* 真实路径后精确清理，再编一次" >> "$log"
+              purge_pkg "$path" "$apkf" "$log"
+              if make -j"$(nproc)" "$path/compile" >> "$log" 2>&1; then
+                ok=2
+              else
+                echo ">>> 清理重试仍失败，用 -j1 V=s 取尾部 100 行" >> "$log"
+                { make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "$log" || true
+                ok=0
+              fi
+            fi
+            if [ "$ok" -ge 1 ]; then
+              hit=$(find bin/packages -type f -name "${apkf}-[0-9]*.apk" | head -n 1)
+              if [ -n "$hit" ]; then
+                if [ "$ok" = "2" ]; then
+                  summary="${summary}\nOK     $apk -> $hit（清理重试后成功）"
+                else
+                  summary="${summary}\nOK     $apk -> $hit"
+                fi
+                cp -f "$hit" output/
+              else
+                {
+                  echo "--- 缓存树里该包残余 stamp/ipkg 目录："
+                  ls -ld build_dir/target-*/"$apkf"-* build_dir/target-*/"$apkf"/.built* 2>/dev/null || echo "(none)"
+                  find staging_dir/target-* -maxdepth 2 -name "*.${apk}*install" 2>/dev/null || true
+                } >> "$log" 2>&1 || true
+                echo "::error::$apk 编译命令成功但没有产出 apk"
+                summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
+              fi
+            else
+              echo "::error::$apk 编译失败，日志 $log"
+              summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
+            fi
+          }
+
           fail=0; summary=""; missing_dirs=""
 
           # purge_pkg：把某个包的历史构建状态彻底清干净。
@@ -653,74 +782,11 @@ jobs:
             log="build_log/${apk}.log"
             sym=$(pkg_sym_for "$apk")
             apkf=$(pkg_apk_for "$apk")
-            echo ">>> 编译 $apk ($path)（符号 ${sym}，产物 ${apkf}-*.apk）"
-            ok=0
-            # 只编指定包时，先把它自己的历史构建状态清干净（缓存树里 .built 在、ipkg-install 空
-            # 会让 make 误判“已编译”，直接跳 Install 报 cp: cannot stat）
-            : > "$log"
-            # 诊断：ser2net 这种「purge 干净了仍 0.0x 秒跳打包」的情况，要先确认该包
-            # 在 .config 与包元数据里是真的存在；不在的话 compile 只是空转，打包必然报
-            # cp: cannot stat .../ipkg-install/...
-            {
-              echo "--- 配置检查 $apk（符号 ${sym}）："
-              grep -n "^CONFIG_PACKAGE_${sym}=" .config || echo "    .config 无 CONFIG_PACKAGE_${sym}"
-              if [ -f tmp/.packageinfo ]; then
-                echo -n "    .packageinfo 记录数: "; grep -c "^Package: ${sym}$" tmp/.packageinfo || true
-                awk -v p="$sym" '/^Package: /{cur=$2} cur==p && /^Depends: /{print "    depends: "$0; exit}' tmp/.packageinfo || true
-              else
-                echo "    tmp/.packageinfo 不存在"
-              fi
-            } >> "$log" 2>&1 || true
-            # 缓存树可能「stamp 在、build_dir/ipkg-install 不在」，这种包无论 only 取
-            # 什么值都必须先清干净，否则 make 直接跳到打包阶段（run 44830801575 的 ser2net）。
-            bd=""
-            for cand in build_dir/target-*/"$(basename "$path")" build_dir/target-*/"$(basename "$path")"-*; do
-              [ -e "$cand" ] && { bd="$cand"; break; }
-            done
-            if [ -z "$bd" ] || [ ! -d "$bd/ipkg-install" ]; then
-              echo ">>> 预先清理 $apk 的历史构建状态（build_dir=${bd:-无}）" >> "$log"
-              purge_pkg "$path" "$apkf" "$log"
-            fi
-            # 首轮就用 V=s：非 verbose 时包内 prepare/configure/build 的实际动作不可见，
-            # 只剩一句 ERROR: package/... failed to build，定位不了「为什么直接跳打包」。
-            if make -j"$(nproc)" V=s "$path/compile" 2>&1 | tee -a "$log"; then
-              ok=1
-            else
-              # 首轮失败：用 make -pn 探测真实 stamp 路径并精确删除，再编一次
-              echo "" >> "$log"
-              echo ">>> 首轮失败：探测 STAMP_* 真实路径后精确清理，再编一次" >> "$log"
-              purge_pkg "$path" "$apkf" "$log"
-              if make -j"$(nproc)" "$path/compile" >> "$log" 2>&1; then
-                ok=2
-              else
-                echo ">>> 清理重试仍失败，用 -j1 V=s 取尾部 100 行" >> "$log"
-                { make -j1 V=s "$path/compile" 2>&1 | tail -n 100; } >> "$log" || true
-                ok=0
-              fi
-            fi
-            if [ "$ok" -ge 1 ]; then
-              hit=$(find bin/packages -type f -name "${apkf}-[0-9]*.apk" | head -n 1)
-              if [ -n "$hit" ]; then
-                if [ "$ok" = "2" ]; then
-                  summary="${summary}\nOK     $apk -> $hit（清理重试后成功）"
-                else
-                  summary="${summary}\nOK     $apk -> $hit"
-                fi
-                cp -f "$hit" output/
-              else
-                {
-                  echo "--- 缓存树里该包残余 stamp/ipkg 目录："
-                  ls -ld build_dir/target-*/"$apkf"-* build_dir/target-*/"$apkf"/.built* 2>/dev/null || echo "(none)"
-                  find staging_dir/target-* -maxdepth 2 -name "*.${apk}*install" 2>/dev/null || true
-                } >> "$log" 2>&1 || true
-                echo "::error::$apk 编译命令成功但没有产出 apk"
-                summary="${summary}\nFAIL   $apk（无 apk 产出）"; fail=1
-              fi
-            else
-              echo "::error::$apk 编译失败，日志 $log"
-              summary="${summary}\nFAIL   $apk（编译失败）"; fail=1
-            fi
+            echo ">>> 入批 $apk ($path)（符号 ${sym}，产物 ${apkf}-*.apk）"
+            bt_path+=("$path"); bt_apk+=("$apk"); bt_apkf+=("$apkf")
+            if [ "${#bt_path[@]}" -ge "$BATCH" ]; then flush_batch; fi
           done < "$manifest"
+          flush_batch
 
           # ------------------------------------------------------------------
           # 收集本次编译产出的**全部** apk，不再按 only 白名单丢弃：
@@ -839,6 +905,7 @@ jobs:
             build_dir/host
             staging_dir/target-*
             staging_dir/host
+            bin/packages
           key: ponwrt-tree-${{ inputs.device }}-${{ hashFiles('configs/**/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/kernel-6.18', 'feeds.conf.default', '.ci-source-commit') }}-${{ github.run_id }}
 
       - name: Stage host apk tool for the publish workflow
