@@ -458,6 +458,126 @@ jobs:
           #    清单第二列是 apk 文件名（可能带 ABI 后缀或为虚拟名），符号一律经
           #    scripts/pkg-name-map.sh 映射后再写 .config；符号是否存在由 oldconfig 后的
           #    .config 硬校验判定（映射覆盖不到的真名错误会在此报红，不静默丢）。
+          # 依赖闭包：清单包只写 =m 不会带出依赖，而 ffmpeg / curl / jsonfilter 这类
+          # select 依赖也不会自己出现；依赖不成立时 oldconfig 会把清单包静默清回 not set
+          #（incremental #72/#73 的 camwatch）。这里按 tmp/.packageinfo 的 Depends 递归
+          # 展开成 =m；不带 PACKAGE_ 的裸符号只白名单置 =y（如 FFMPEG_PROGRAMS）。
+          if [ -f tmp/.packageinfo ]; then
+            python3 - "$only_pkgs" configs/pon-userspace-packages.txt configs/pon-extra-packages.txt <<'PY'
+          import re, os, sys
+
+          BARE_OK = {'FFMPEG_PROGRAMS'}
+          only = sys.argv[1] if len(sys.argv) > 1 else 'all'
+
+          menus = set()
+          try:
+              for line in open('tmp/.config-package.in', encoding='utf-8', errors='replace'):
+                  m = re.match(r'\s*(?:menu)?config\s+(\S+)', line)
+                  if m:
+                      menus.add(m.group(1))
+          except FileNotFoundError:
+              pass
+
+          entries, provides, cur = {}, {}, None
+          for line in open('tmp/.packageinfo', encoding='utf-8', errors='replace'):
+              line = line.rstrip('\n')
+              if line.startswith('Package: '):
+                  cur = line.split(': ', 1)[1].strip()
+                  entries.setdefault(cur, [])
+              elif line.startswith('Depends: ') and cur:
+                  deps = []
+                  for tok in re.split(r'[,\s]+', line.split(': ', 1)[1]):
+                      tok = tok.strip().lstrip('+@')
+                      if not tok:
+                          continue
+                      if ':' in tok:
+                          tok = tok.split(':', 1)[1]
+                      tok = re.sub(r'\(.*?\)', '', tok).strip()
+                      if tok:
+                          deps.append(tok)
+                  entries[cur] = deps
+              elif line.startswith('Provides: ') and cur:
+                  for tok in re.split(r'[,\s]+', line.split(': ', 1)[1]):
+                      tok = tok.strip()
+                      if tok:
+                          provides.setdefault(tok, []).append(cur)
+              elif not line.strip():
+                  cur = None
+
+          targets = []
+          for path in sys.argv[2:]:
+              if not os.path.exists(path):
+                  continue
+              for line in open(path, encoding='utf-8'):
+                  line = line.strip()
+                  if not line or line.startswith('#'):
+                      continue
+                  parts = line.split('|')
+                  if len(parts) >= 2 and parts[1].strip():
+                      nm = parts[1].strip()
+                      if only != 'all' and nm not in [x.strip() for x in only.split(',')]:
+                          continue
+                      targets.append(nm)
+
+          def has_sym(n):
+              return ('PACKAGE_' + n) in menus or n in menus
+
+          alias = {}
+          for t in targets:
+              if ('PACKAGE_' + t) in menus:
+                  continue
+              cands = [c for c in provides.get(t, []) if has_sym(c)]
+              if cands:
+                  alias[t] = cands[0]
+
+          seen, stack = set(), [alias.get(t, t) for t in targets]
+          while stack:
+              n = stack.pop()
+              if n in seen:
+                  continue
+              seen.add(n)
+              for d in entries.get(n, []):
+                  if d.startswith('kmod-'):
+                      continue
+                  if d not in seen:
+                      stack.append(d)
+
+          lines = []
+          for n in sorted(seen):
+              if ('PACKAGE_' + n) in menus:
+                  lines.append('m|' + n)
+              elif n in menus and n in BARE_OK:
+                  lines.append('y|' + n)
+          with open('/tmp/closure2.txt', 'w', encoding='utf-8') as fh:
+              fh.write('\n'.join(lines) + ('\n' if lines else ''))
+          print('>>> 依赖闭包：%d 个包可落 =m，%d 个裸符号'
+                % (len([l for l in lines if l.startswith('m|')]),
+                   len([l for l in lines if l.startswith('y|')])))
+          PY
+            added=0; bare=0
+            while IFS='|' read -r kind name; do
+              [ -n "${name:-}" ] || continue
+              if [ "$kind" = "m" ]; then
+                if grep -q "^CONFIG_PACKAGE_${name}=" .config; then
+                  grep -q "^CONFIG_PACKAGE_${name}=m" .config || {
+                    sed -i "s/^CONFIG_PACKAGE_${name}=.*/CONFIG_PACKAGE_${name}=m/" .config
+                    added=$((added+1))
+                  }
+                else
+                  printf 'CONFIG_PACKAGE_%s=m\n' "$name" >> .config
+                  added=$((added+1))
+                fi
+              else
+                if ! grep -q "^CONFIG_${name}=y" .config; then
+                  printf 'CONFIG_%s=y\n' "$name" >> .config
+                  bare=$((bare+1))
+                fi
+              fi
+            done < /tmp/closure2.txt
+            echo ">>> 闭包落地：新加 =m ${added} 个、裸符号 ${bare} 个"
+          else
+            echo "::warning::没有 tmp/.packageinfo，跳过依赖闭包"
+          fi
           . scripts/pkg-name-map.sh
           only_pkgs="${{ inputs.only }}"
           selmiss=""
