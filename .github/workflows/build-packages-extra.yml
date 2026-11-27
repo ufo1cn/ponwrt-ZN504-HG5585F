@@ -1,4 +1,4 @@
-name: Build Packages (extra C-class | iptv/nikki/passwall2/homeproxy) manual
+name: PonWrt 软件包编译（扩展 C 类）
 
 # ==============================================================================
 # 只允许手动触发（workflow_dispatch）：无 push / schedule 触发。
@@ -91,7 +91,7 @@ env:
 
 jobs:
   packages:
-    name: Build extra packages (${{ inputs.device }})
+    name: 编译扩展包（${{ inputs.device }}）
     runs-on: ubuntu-24.04
     timeout-minutes: 480
     permissions:
