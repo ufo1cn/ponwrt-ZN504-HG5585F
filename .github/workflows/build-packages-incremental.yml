@@ -394,11 +394,27 @@ jobs:
           { echo "### 已摘除的 kmod 依赖（由固件流程编译）"; echo '```'; cat /tmp/stripped-kmods.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
           # ③ 重建包元数据（此时元数据里已无 kernel/gpio 定义），再清洁 .config
-          rm -f tmp/.config-package.in tmp/.packageinfo tmp/.packagedeps
-          strip_pkg_sel
-          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/inc-oldconfig.log 2>&1 || {
-            tail -n 60 /tmp/inc-oldconfig.log
+          # 元数据重建：必须连扫描缓存一起清（tmp/info 里的 .scan-*.stamp 与 .files-*）。
+          # 只删 tmp/.packageinfo 时，prepare-tmpinfo 的 scan_unchanged 会走「未变化」快
+          # 路径、不重新 dump，于是 .config-package.in 变成空壳 → 清单包符号全部判缺
+          #（incremental #68 实证）。这里显式 prepare-tmpinfo + oldconfig，并硬门控定义数。
+          rm -rf tmp/info tmp/.packageinfo tmp/.packagedeps tmp/.config-package.in \
+                 tmp/.config-feeds.in tmp/.config-target.in
+          timeout 1800 bash -c 'make -s prepare-tmpinfo' >/tmp/pkg-tmpinfo.log 2>&1 || {
+            tail -n 40 /tmp/pkg-tmpinfo.log
+            echo "::error::prepare-tmpinfo 失败（包元数据无法重建）"
+            exit 1
+          }
+          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-rebuild.log 2>&1 || {
+            tail -n 60 /tmp/pkg-oldconfig-rebuild.log
             echo "::error::包元数据同步失败（oldconfig）"
+            exit 1
+          }
+          pkgdefs=$(grep -cE '^config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
+          echo ">>> 包元数据重建：PACKAGE 定义 ${pkgdefs:-0} 个"
+          [ "${pkgdefs:-0}" -ge 5000 ] || {
+            echo "::error::包元数据重建后定义过少（${pkgdefs:-0}），feeds 扫描未生效"
+            ls -l tmp/.config-package.in 2>/dev/null || true
             exit 1
           }
           strip_pkg_sel
@@ -509,13 +525,29 @@ jobs:
           done
           if [ -n "$meta_miss" ]; then
             echo ">>> 包元数据缺这些清单包符号，强制全量重扫：${meta_miss}"
-            rm -rf tmp/info tmp/.packageinfo tmp/.packagedeps tmp/.config-package.in
-            timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-rescan1.log 2>&1 || true
-            timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-rescan2.log 2>&1 || {
-              tail -n 60 /tmp/pkg-rescan2.log
-              echo "::error::强制重扫后 oldconfig 失败"
-              exit 1
-            }
+          # 元数据重建：必须连扫描缓存一起清（tmp/info 里的 .scan-*.stamp 与 .files-*）。
+          # 只删 tmp/.packageinfo 时，prepare-tmpinfo 的 scan_unchanged 会走「未变化」快
+          # 路径、不重新 dump，于是 .config-package.in 变成空壳 → 清单包符号全部判缺
+          #（incremental #68 实证）。这里显式 prepare-tmpinfo + oldconfig，并硬门控定义数。
+          rm -rf tmp/info tmp/.packageinfo tmp/.packagedeps tmp/.config-package.in \
+                 tmp/.config-feeds.in tmp/.config-target.in
+          timeout 1800 bash -c 'make -s prepare-tmpinfo' >/tmp/pkg-tmpinfo.log 2>&1 || {
+            tail -n 40 /tmp/pkg-tmpinfo.log
+            echo "::error::prepare-tmpinfo 失败（包元数据无法重建）"
+            exit 1
+          }
+          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-rebuild.log 2>&1 || {
+            tail -n 60 /tmp/pkg-oldconfig-rebuild.log
+            echo "::error::包元数据同步失败（oldconfig）"
+            exit 1
+          }
+          pkgdefs=$(grep -cE '^config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
+          echo ">>> 包元数据重建：PACKAGE 定义 ${pkgdefs:-0} 个"
+          [ "${pkgdefs:-0}" -ge 5000 ] || {
+            echo "::error::包元数据重建后定义过少（${pkgdefs:-0}），feeds 扫描未生效"
+            ls -l tmp/.config-package.in 2>/dev/null || true
+            exit 1
+          }
             meta_miss=""
             for s in $sym_list; do
               if ! grep -qE "^config PACKAGE_${s}[[:space:]]*$" tmp/.config-package.in; then
