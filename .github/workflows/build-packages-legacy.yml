@@ -373,6 +373,17 @@ jobs:
           n=0
           for f in $stripped; do
             sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$f"
+            # 同一份 Makefile 里用 $(KERNEL_MAKE) 编内核模块的段（open-app-filter 的 oaf.ko）
+            # 包流没有内核树，必须摘掉；摘不掉直接失败，避免又拉起内核链。
+            if grep -q 'KERNEL_MAKE' "$f"; then
+              cp -f "$f" "/tmp/kernelmk-$(echo "$f" | tr '/' '_').bak"
+              sed -i -E '/^[[:space:]]*\+\$\(KERNEL_MAKE\)/{N;d}' "$f"
+              if grep -q 'KERNEL_MAKE' "$f"; then
+                echo "::error::$f 仍有 KERNEL_MAKE 编译段（形态与预期不符），拒绝在包流编它"
+                exit 1
+              fi
+              echo ">>> 已摘除 $f 的内核编译段（内核模块由固件流程编）"
+            fi
             sed -i -E '/^[[:space:]]*DEPENDS/ s/[[:space:]]+/ /g; /^[[:space:]]*DEPENDS/ s/[[:space:]]+$//' "$f"
             n=$((n+1))
           done
