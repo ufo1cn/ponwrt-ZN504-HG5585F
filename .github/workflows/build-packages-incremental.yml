@@ -692,7 +692,12 @@ jobs:
             # 目标与前置等时 → 全部判成过期（extra #49/#50 实测：整套 tools 重编、
             # tools/xxhash 直接失败）。所以 stamp=2035、其余文件压到 2026-06-01（更早）。
             find "$d" -type f ! -path '*/stamp/*' -exec touch -d '2026-06-01 00:00:00' {} + 2>/dev/null || true
+            # OpenWrt 的 host 包 stamp 不只在 */stamp/ 目录：新版把 .prepared<hash>/.configured/.built
+            # 直接放在 build_dir/<pkg>/ 下（fakeroot/.prepared40996… 即是）。按文件名判定，
+            # 否则这些点文件与源文件同一时刻 → 整套 tools 被误判过期重编（extra #55 实测 fakeroot/flex 失败）。
             find "$d" -type f -path '*/stamp/*' -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
+            find "$d" -type f -regex '.*/\.(prepared|configured|built|installed|depends|quilt|patched|configure)[^/]*' \
+              -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
             n=$((n+1))
           done
           echo ">>> 时间戳归一：${n} 个目录已归一（stamp=2035、源文件=2026-06-01，make 才会跳过已编产物）"
@@ -700,7 +705,12 @@ jobs:
       - name: Build host tools and toolchain
         run: |
           set -euo pipefail
-          make -j"$(nproc)" tools/compile
+          # 并发编 tools 偶发失败（fakeroot/flex 同时红、无错误文本）时串行重试一次：
+          # -j1 会把真正的错误打出来，也避开并发带来的偶发问题。
+          make -j"$(nproc)" tools/compile || {
+            echo "::warning::并发编 tools 失败，改串行重试（-j1 会打印具体错误）"
+            make -j1 tools/compile
+          }
           make -j"$(nproc)" toolchain/compile
 
 
