@@ -215,7 +215,7 @@ jobs:
           defused=""
           for manifest in configs/pon-*.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required; do
+            while IFS='|' read -r path apk required || [ -n "\" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               dir="$path"
@@ -363,13 +363,26 @@ jobs:
           touched=0
           for manifest in configs/pon-userspace-packages.txt configs/pon-extra-packages.txt; do
             [ -f "$manifest" ] || continue
-            while IFS='|' read -r path apk required; do
+            while IFS='|' read -r path apk required || [ -n "\" ]; do
               [ -n "${path:-}" ] || continue
               case "$path" in \#*) continue ;; esac
               [ -f "$path/Makefile" ] || continue
-              hits=$(grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)' "$path/Makefile" | sed 's/^+//' | sort -u || true)
+              hits=$(sed -n -e '/^[[:space:]]*#/!p' "$path/Makefile" | grep -oE '\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)' | sed 's/^+//' | sort -u || true)
+              # 有些包的 Makefile 用 $(KERNEL_MAKE) 在同一份文件里编内核模块（open-app-filter
+              # 就是：+$(KERNEL_MAKE) ... M="$(PKG_BUILD_DIR)/oaf/src" modules）。包流没有内核
+              # 构建产物，这段必须摘掉，只留 $(call Build/Compile/Default) 的用户态编译；
+              # oaf.ko 本体由固件流以 kmod-oaf apk 出。摘不掉就直接失败，避免又拉起内核链。
+              if grep -q 'KERNEL_MAKE' "$path/Makefile"; then
+                cp -f "$path/Makefile" "/tmp/kernelmk-$(echo "$apk" | tr '/' '_').bak"
+                sed -i -E '/^[[:space:]]*\+\$\(KERNEL_MAKE\)/{N;d}' "$path/Makefile"
+                if grep -q 'KERNEL_MAKE' "$path/Makefile"; then
+                  echo "::error::$apk 的 Makefile 仍有 KERNEL_MAKE 编译段（形态与预期不符），拒绝在包流编它"
+                  exit 1
+                fi
+                echo ">>> 已摘除 $apk 的 Makefile 内核编译段（内核模块由固件流程编）"
+              fi
               [ -n "$hits" ] || continue
-              sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$path/Makefile"
+              sed -i -E '/^[[:space:]]*#/! s/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$path/Makefile"
               sed -i -E '/^[[:space:]]*DEPENDS/ s/[[:space:]]+/ /g; /^[[:space:]]*DEPENDS/ s/[[:space:]]+$//' "$path/Makefile"
               touched=$((touched+1))
               printf '%s\n' "$hits" >> /tmp/stripped-kmods.txt
@@ -891,7 +904,7 @@ jobs:
           }
 
 
-          while IFS='|' read -r path apk required; do
+          while IFS='|' read -r path apk required || [ -n "\" ]; do
             [ -n "${path:-}" ] || continue
             case "$path" in \#*) continue ;; esac
             if [ "$only" != "all" ]; then
