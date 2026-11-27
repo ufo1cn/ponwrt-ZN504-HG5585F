@@ -807,7 +807,36 @@ jobs:
             echo ">>> OK[$tag] $apk -> $hit"
           }
 
+          # ------------------------------------------------------------------
+          # 包流零 kmod、零内核：每次 make 之前重申一遍（#61 / #86 根因）
+          #   rebuild 元数据后，若 .config 比 tmp/.config-package.in 旧，make 会自动
+          #   跑 oldconfig，把 CONFIG_PACKAGE_kernel / kmod-* 的默认选择写回，于是把
+          #   package/kernel/linux 拉进构建；包流树里没有内核产物，LINUX_VERMAGIC
+          #   落到 unknown，kmod 的 EXTRA_DEPENDS 变成 “kernel (=6.18.60~unknown-r1)”
+          #   这种非法依赖串 —— apk 元数据校验直接 Error 99 → kernel 包失败、整批失败。
+          #   这里把 kernel/kmod 选择清成显式 not set，并 touch .config 抬高 mtime，
+          #   让 make 判定无需 oldconfig。
+          # ------------------------------------------------------------------
+          sanitize_config() {
+            sed -i -E 's#^CONFIG_PACKAGE_(kmod-[A-Za-z0-9_.+-]+|gpio-button-hotplug|appfilter|open-app-filter|oaf)=.*#\# CONFIG_PACKAGE_\1 is not set#' .config
+            sed -i -E 's#^CONFIG_PACKAGE_kernel=.*#\# CONFIG_PACKAGE_kernel is not set#' .config
+            grep -q '^# CONFIG_PACKAGE_kernel is not set' .config \
+              || echo '# CONFIG_PACKAGE_kernel is not set' >> .config
+            local n
+            n=$(grep -c '^CONFIG_PACKAGE_kmod-' .config 2>/dev/null || true)
+            if [ "${n:-0}" -gt 0 ]; then
+              echo "::error::净化后仍有 ${n} 个 CONFIG_PACKAGE_kmod-* 被选中（包流不允许编 kmod）"
+              exit 1
+            fi
+            if grep -q '^CONFIG_PACKAGE_kernel=' .config; then
+              echo "::error::净化后 CONFIG_PACKAGE_kernel 仍被选中（会拉 package/kernel/linux 进构建）"
+              exit 1
+            fi
+            touch .config
+          }
+
           flush_batch() {
+            sanitize_config
             if [ "${#bt_path[@]}" -eq 0 ]; then return 0; fi
             local targets=() i
             for i in "${!bt_path[@]}"; do targets+=("${bt_path[$i]}/compile"); done
@@ -824,6 +853,7 @@ jobs:
 
           build_one() {
             local path="$1" apk="$2" apkf="$3"
+            sanitize_config
             log="build_log/${apk}.log"
             sym=$(pkg_sym_for "$apk")
             ok=0
