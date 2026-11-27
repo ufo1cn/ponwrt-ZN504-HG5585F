@@ -421,6 +421,7 @@ jobs:
             return 0
           }
           manifest=configs/pon-userspace-packages.txt
+          sym_list=""
           while IFS='|' read -r pkgpath pkgname pkgreq || [ -n "${pkgpath:-}" ]; do
             [ -n "${pkgpath:-}" ] || continue
             case "$pkgpath" in \#*) continue ;; esac
@@ -429,6 +430,7 @@ jobs:
             fi
             [ -d "$pkgpath" ] || continue
             sym=$(pkg_sym_for "$pkgname")
+            sym_list="$sym_list $sym"
             if ! grep -qE "^CONFIG_PACKAGE_${sym}=[ym]$" .config; then
               sed -i "/^CONFIG_PACKAGE_${sym}=/d; /^# CONFIG_PACKAGE_${sym} is not set/d" .config
               printf 'CONFIG_PACKAGE_%s=m\n' "$sym" >> .config
@@ -445,7 +447,46 @@ jobs:
             echo "::error::清单包选择同步失败（oldconfig）"
             exit 1
           }
+          # 缓存树上新加入的包目录（r38/r39 的 camwatch）：scan.mk 生成的
+          # tmp/info/.files-packageinfo.mk 是「先 include 后重建」，单次 make 只认旧规则，
+          # 新包既不进 tmp/.packageinfo、也就不进 tmp/.config-package.in —— Kconfig 里没有
+          # 这个符号，oldconfig 会把 CONFIG_PACKAGE_<新包>=m 静默清掉（报成「包名不存在或
+          # 依赖不可选」）。所以再跑一遍 oldconfig 让新规则生效；符号仍缺就清 tmp/info 全量重扫。
+          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-sel2.log 2>&1 || true
+          meta_miss=""
+          for s in $sym_list; do
+            grep -qx "config PACKAGE_${s}" tmp/.config-package.in || meta_miss="$meta_miss $s"
+          done
+          if [ -n "$meta_miss" ]; then
+            echo ">>> 包元数据缺这些清单包符号，强制全量重扫：${meta_miss}"
+            rm -rf tmp/info tmp/.packageinfo tmp/.packagedeps tmp/.config-package.in
+            timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-rescan1.log 2>&1 || true
+            timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-rescan2.log 2>&1 || {
+              tail -n 60 /tmp/pkg-rescan2.log
+              echo "::error::强制重扫后 oldconfig 失败"
+              exit 1
+            }
+            meta_miss=""
+            for s in $sym_list; do
+              grep -qx "config PACKAGE_${s}" tmp/.config-package.in || meta_miss="$meta_miss $s"
+            done
+            [ -z "$meta_miss" ] || { echo "::error::清单包符号始终不在包元数据里（Makefile 未扫描到或 dump 失败）:${meta_miss}"; exit 1; }
+          fi
+          # 二次 oldconfig / 重扫期间被清掉的 =m 在这里写回，再同步一次并重跑依赖闭包
+          for s in $sym_list; do
+            grep -qE "^CONFIG_PACKAGE_${s}=[ym]$" .config && continue
+            sed -i "/^CONFIG_PACKAGE_${s}=/d; /^# CONFIG_PACKAGE_${s} is not set/d" .config
+            printf 'CONFIG_PACKAGE_%s=m\n' "$s" >> .config
+            echo ">>> 重新写回清单包选择 ${s}=m"
+          done
+          : > /tmp/sel-seen.txt
+          for s in $sym_list; do sel_dep "$s" 1; done
           strip_pkg_sel
+          timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-sel3.log 2>&1 || {
+            tail -n 40 /tmp/pkg-oldconfig-sel3.log
+            echo "::error::清单包选择复同步失败（oldconfig）"
+            exit 1
+          }
           while IFS='|' read -r pkgpath pkgname pkgreq || [ -n "${pkgpath:-}" ]; do
             [ -n "${pkgpath:-}" ] || continue
             case "$pkgpath" in \#*) continue ;; esac
