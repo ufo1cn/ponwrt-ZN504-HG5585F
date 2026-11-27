@@ -336,7 +336,20 @@ jobs:
                   'dir': outdir,
               }
               old_sha, old_tag = remote_sha(dev)
-              unchanged = bool(old_sha) and old_sha == real and os.environ.get('FORCE', 'false') != 'true'
+              tag = 'fw-%s%s-r%s-%s' % (dev,
+                                        '' if os.environ.get('IDX_BRANCH', 'repo') == 'repo'
+                                        else '-' + os.environ['IDX_BRANCH'].replace('repo-', ''),
+                                        built_run, (info.get('commit') or commit)[:7])
+              meta['tag'] = tag
+              # 索引里写的 tag 必须真的有 Release。清理步骤误删或只删了 Release 时，
+              # 只看 sha256 会把“索引指向不存在的版本”当成“内容未变”而永远不修，故这里实查一次。
+              tag_ok = subprocess.run(
+                  ['gh', 'api', 'repos/%s/releases/tags/%s' % (os.environ['DST_REPO'], tag)],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+              if not tag_ok:
+                  print('    %s 的 %s 没有 Release，本次必须重建（不按内容未变跳过）' % (dev, tag))
+              unchanged = (bool(old_sha) and old_sha == real and tag_ok
+                           and os.environ.get('FORCE', 'false') != 'true')
               meta['unchanged'] = unchanged
               if unchanged:
                   print('>>> %s：镜像 sha256 与已发布索引（%s）相同，本次不更新版本' % (dev, old_tag))
@@ -478,22 +491,29 @@ jobs:
           rels = json.load(open('rels-%s.json' % kind, encoding='utf-8'))
           def family(tag):
               if kind == 'fw':
-                  m = re.match(r'^fw-(.+?)(-wed)?-r\d+-[0-9a-f]{7}$', tag)
-                  if m: return ('fw', m.group(1) + (m.group(2) or ''))
+                  m = re.match(r'^fw-(.+?)(-wed)?-r(\d+)-[0-9a-f]{7}$', tag)
+                  if m:
+                      # repo 与 repo-wed 是两条独立的发布线，并发跑时不能互相删对方的 tag
+                      want_wed = os.environ.get('IDX_BRANCH', 'repo') == 'repo-wed'
+                      if bool(m.group(2)) != want_wed:
+                          return None, 0
+                      return ('fw', m.group(1) + (m.group(2) or '')), int(m.group(3))
               else:
-                  m = re.match(r'^(kmods-[a-z]+)-r\d+$', tag)
-                  if m: return ('kmods', m.group(1))
-                  m = re.match(r'^v[0-9][0-9a-z.\-]*-(all|wed)-r\d+$', tag)
-                  if m: return ('fwrel', m.group(1))
-              return None
-          seen, dele = {}, []
+                  m = re.match(r'^(kmods-[a-z]+)-r(\d+)$', tag)
+                  if m: return ('kmods', m.group(1)), int(m.group(2))
+                  m = re.match(r'^v[0-9][0-9a-z.\-]*-(all|wed)-r(\d+)$', tag)
+                  if m: return ('fwrel', m.group(1)), int(m.group(2))
+              return None, 0
+          fams, dele = {}, []
           for r in rels:
-              f = family(r['tag_name'])
+              f, rn = family(r['tag_name'])
               if not f: continue
-              seen[f] = seen.get(f, 0) + 1
+              fams.setdefault(f, []).append((rn, r['created_at'], r))
+          for f, rs in fams.items():
+              # 按 run 号判新旧：created_at 在并发发布时可能把刚发的版本排在后面而被误删
+              rs.sort(key=lambda x: (x[0], x[1]), reverse=True)
               limit = 1 if kind != 'fw' else keep_dev
-              if seen[f] > limit:
-                  dele.append(r)
+              dele.extend(x[2] for x in rs[limit:])
           for r in dele:
               print('prune %s %s' % (repo, r['tag_name']))
               subprocess.run(['gh','api','-X','DELETE','repos/%s/releases/%s' % (repo, r['id'])], check=False)
