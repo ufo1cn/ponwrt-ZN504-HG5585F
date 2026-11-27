@@ -224,7 +224,7 @@ jobs:
               # （open-app-filter 的 oaf.ko 由它自己的 Makefile 顺手编，摘除动作在 incremental
               # 的 Strip 步骤里；本流不编它，这里只是别让清单里的它把 preflight 卡红）。
               if grep -q 'KERNEL_MAKE' "$dir/Makefile"; then
-                if grep -qE '^[[:space:]]*\+\$(KERNEL_MAKE)' "$dir/Makefile"; then
+                if grep -qE '^[[:space:]]*\+\$\(KERNEL_MAKE\)' "$dir/Makefile"; then
                   defused="${defused}  ${apk} (${dir})\n"
                 else
                   hit="${hit}      KERNEL_MAKE: $(grep -nF 'KERNEL_MAKE' "$dir/Makefile" | head -n 2)\n"

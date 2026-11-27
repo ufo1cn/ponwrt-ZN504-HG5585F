@@ -235,7 +235,7 @@ jobs:
               # 真正要编内核状态模块（读 LINUX_DIR/KARCH）的包仍然在这里被拒。
               # 摘除动作在后面的 Strip 步骤里做（会硬校验 KERNEL_MAKE 已不存在）。
               if grep -q 'KERNEL_MAKE' "$dir/Makefile"; then
-                if grep -qE '^[[:space:]]*\+\$(KERNEL_MAKE)' "$dir/Makefile"; then
+                if grep -qE '^[[:space:]]*\+\$\(KERNEL_MAKE\)' "$dir/Makefile"; then
                   defused="${defused}  ${apk} (${dir})\n"
                 else
                   hit="${hit}      KERNEL_MAKE: $(grep -nF 'KERNEL_MAKE' "$dir/Makefile" | head -n 2)\n"
