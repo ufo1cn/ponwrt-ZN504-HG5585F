@@ -238,15 +238,29 @@ jobs:
         with:
           path: |
             build_dir/host
-            build_dir/toolchain-*
             build_dir/target-*/linux-*
             staging_dir/host
-            staging_dir/toolchain-*
           key: ponwrt-fwtree-${{ hashFiles('configs/an7581.config', 'configs/release.config', 'configs/features/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default', 'target/linux/airoha/image/an7581.mk') }}-${{ github.sha }}
           restore-keys: |
             ponwrt-fwtree-${{ hashFiles('configs/an7581.config', 'configs/release.config', 'configs/features/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default', 'target/linux/airoha/image/an7581.mk') }}-
             ponwrt-fwtree-
             ponwrt-fwtree-
+
+      # 交叉工具链（gcc/binutils/musl）单独一份稳定 key 的缓存：
+      # 原来它跟着 tree cache 走（key 带 run/sha，等于每 run 重存 300-400MB），
+      # 而包流的 tree cache 根本没纳入 toolchain 路径 → 每轮重编 ~30 分钟。
+      # 这里用「工具链源码内容哈希」做 key，命中一次就一直复用，
+      # 只在新工具链源码/目标配置变化时自动失效并重建。
+      - name: Restore host toolchain cache
+        id: hosttc
+        if: inputs.cache_mode != '不使用缓存'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build_dir/toolchain-*
+            staging_dir/toolchain-*
+          key: ponwrt-hosttc-v1-${{ hashFiles('toolchain/**', 'configs/an7581.config', 'configs/release.config') }}
 
       # dl（源码包）缓存：actions/cache@v4 的 post 保存只在 job 成功时执行，
       # 固件这一步经常红 → dl 从来没落盘。这里只做 restore，保存放在 job 末尾单独做。
@@ -868,6 +882,23 @@ jobs:
       - name: Download package sources
         run: make download -j"$(nproc)"
 
+      # checkout 会把源码 mtime 刷成"现在"，而缓存解出来的产物保留旧 mtime，
+      # make 一比就判定"产物过期"，把已编好的 host tools / toolchain 全部重编一遍
+      # （实测这一下要 25-30 分钟）。把产物时间戳顶到未来，源码就永远比产物旧。
+      # 只动 host/toolchain 两层：staging_dir/target-* 带 package stamp，
+      # 推时间戳会有"stamp 在、apk 不在"的静默丢包风险（固件流注释里已踩过）。
+      - name: Normalize cached host/toolchain mtimes
+        if: inputs.cache_mode != '不使用缓存'
+        run: |
+          set -uo pipefail
+          n=0
+          for d in build_dir/host build_dir/toolchain-* staging_dir/host staging_dir/toolchain-*; do
+            [ -e "$d" ] || continue
+            find "$d" -type f -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
+            n=$((n+1))
+          done
+          echo ">>> 时间戳归一：${n} 个目录已推到 2035-01-01（make 才会跳过已编产物）"
+
       - name: Compile firmware
         run: |
           [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
@@ -1209,11 +1240,19 @@ jobs:
         with:
           path: |
             build_dir/host
-            build_dir/toolchain-*
             build_dir/target-*/linux-*
             staging_dir/host
-            staging_dir/toolchain-*
           key: ponwrt-fwtree-${{ hashFiles('configs/an7581.config', 'configs/release.config', 'configs/features/*.config', 'target/linux/airoha/an7581/config-6.18', 'target/linux/generic/config-6.18', 'feeds.conf.default', 'target/linux/airoha/image/an7581.mk') }}-${{ github.sha }}
+
+      - name: Save host toolchain cache
+        if: always() && inputs.cache_mode != '不使用缓存' && steps.hosttc.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build_dir/toolchain-*
+            staging_dir/toolchain-*
+          key: ponwrt-hosttc-v1-${{ hashFiles('toolchain/**', 'configs/an7581.config', 'configs/release.config') }}
 
       - name: Save downloads cache
         if: always() && inputs.cache_mode != '不使用缓存'
