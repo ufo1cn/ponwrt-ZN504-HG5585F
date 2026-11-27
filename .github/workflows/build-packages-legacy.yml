@@ -388,8 +388,12 @@ jobs:
               cp -f "$f" "/tmp/kernelmk-$(echo "$f" | tr '/' '_').bak"
               sed -i -E '/^[[:space:]]*\+\$\(KERNEL_MAKE\)/{N;d}' "$f"
               if grep -q 'KERNEL_MAKE' "$f"; then
-                echo "::error::$f 仍有 KERNEL_MAKE 编译段（形态与预期不符），拒绝在包流编它"
-                exit 1
+                # 残留的是 $(KERNEL_MAKE_FLAGS) 一类形态（xtables-addons：借内核树编
+                # libxt_*.so），包流里没有 kbuild，整文件还原并跳过它；这类包都不在
+                # 任何用户态清单里，真进了清单会被后面的「无 apk 产出」显式报错。
+                cp -f "/tmp/kernelmk-$(echo "$f" | tr '/' '_').bak" "$f"
+                echo ">>> 跳过 $f（Build 段依赖内核源码树 KERNEL_MAKE*，由固件流程编）"
+                continue
               fi
               echo ">>> 已摘除 $f 的内核编译段（内核模块由固件流程编）"
             fi

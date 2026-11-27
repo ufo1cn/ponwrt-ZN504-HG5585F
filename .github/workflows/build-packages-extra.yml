@@ -873,7 +873,7 @@ jobs:
           #   让 make 判定无需 oldconfig。
           # ------------------------------------------------------------------
           sanitize_config() {
-            sed -i -E 's#^CONFIG_PACKAGE_(kmod-[A-Za-z0-9_.+-]+|gpio-button-hotplug|appfilter|open-app-filter|oaf)=.*#\# CONFIG_PACKAGE_\1 is not set#' .config
+            sed -i -E 's#^CONFIG_PACKAGE_(kmod-[A-Za-z0-9_.+-]+|gpio-button-hotplug)=.*#\# CONFIG_PACKAGE_\1 is not set#' .config
             sed -i -E 's#^CONFIG_PACKAGE_kernel=.*#\# CONFIG_PACKAGE_kernel is not set#' .config
             grep -q '^# CONFIG_PACKAGE_kernel is not set' .config \
               || echo '# CONFIG_PACKAGE_kernel is not set' >> .config
@@ -890,10 +890,27 @@ jobs:
             touch .config
           }
 
+          # 用户态清单里「同一份 Makefile 内联编内核模块」的包（open-app-filter 的 oaf.ko）：
+          # 包流没有内核源码树，编前把 +kmod-* 依赖摘掉、Build/Compile 改写回默认用户态编译，
+          # kmod 本体仍由固件流程交付（不在包流产出）。
+          strip_embedded_kernel_build() {
+            local path="$1" mk="$1/Makefile"
+            [ -f "$mk" ] || return 0
+            grep -q 'define KernelPackage/' "$mk" || return 0
+            grep -q 'define Package/' "$mk" || return 0
+            grep -q 'KERNEL_MAKE' "$mk" || return 0
+            sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+)//g' "$mk"
+            if grep -q 'KERNEL_MAKE' "$mk"; then
+              printf '\nBuild/Compile=$(call Build/Compile/Default)\n' >> "$mk"
+              echo ">>> 已改写 $mk：摘掉内联 KERNEL_MAKE，Build/Compile 回落到默认用户态编译"
+            fi
+          }
+
           flush_batch() {
             sanitize_config
             if [ "${#bt_path[@]}" -eq 0 ]; then return 0; fi
-            local targets=() i
+            local targets=() i k
+            for k in "${!bt_path[@]}"; do strip_embedded_kernel_build "${bt_path[$k]}"; done
             for i in "${!bt_path[@]}"; do targets+=("${bt_path[$i]}/compile"); done
             batch_no=$((batch_no+1))
             echo ">>> 批量编译 ${#bt_path[@]} 个包（batch-${batch_no}）：${bt_apk[*]}"
@@ -909,6 +926,7 @@ jobs:
           build_one() {
             local path="$1" apk="$2" apkf="$3"
             sanitize_config
+            strip_embedded_kernel_build "$path"
             if make -j"$(nproc)" "$path/compile" 2>&1 | tee "build_log/${apk}.log"; then
               hit=$(find bin/packages bin/targets -type f -name "${apkf}-[0-9]*.apk" | head -n 1)
               if [ -n "$hit" ]; then
