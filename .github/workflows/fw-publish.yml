@@ -1,4 +1,4 @@
-name: Publish firmware to update index
+name: PonWrt 固件发布（写入软仓索引与 Release）
 # 配套 package/luci-app-ponwrt-update：把已编好的固件搬进 apk-repo 的 Release，
 # 再写 meta/fw/<device>.json（字段与 app 读取的完全一致：tag / run /
 # sysupgrade{name,sha256,url}）。app 用 run 与本机 /etc/ponwrt-version 的 run 比大小，
@@ -63,7 +63,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve publish plan
+      - name: 解析发布计划
         id: plan
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -187,7 +187,7 @@ jobs:
               f.write('label=%s\n' % LABEL)
           PY
 
-      - name: Download firmware artifacts
+      - name: 下载固件 Artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -204,7 +204,7 @@ jobs:
           done < plan.tsv
           du -sh dl/* | sed 's/^/    /'
 
-      - name: Verify firmware artifacts
+      - name: 校验固件 Artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE: ${{ inputs.force_republish }}
@@ -356,7 +356,7 @@ jobs:
               json.dump(prepared, f, ensure_ascii=False, indent=2)
           PY
 
-      - name: Publish release in apk repo
+      - name: 在软仓发布 Release
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
@@ -391,7 +391,7 @@ jobs:
               || gh release upload "$tag" -R "$DST_REPO" --clobber "${files[@]}"
           done < rels.tsv
 
-      - name: Update firmware index in apk repo
+      - name: 更新软仓固件索引
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
@@ -458,7 +458,7 @@ jobs:
       # 保留策略：apk-repo 里每机型每线只留最新 2 个固件 Release；
       # 固件仓里 kmods-<label>/v<时间戳>-<label> 各只留最新 1 个。
       # 只按本仓自己的命名族回删，绝不碰 meta 指向的最新版；dry-run 不删。
-      - name: Prune old releases
+      - name: 清理过期 Release
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.APK_REPO_TOKEN }}
@@ -504,7 +504,7 @@ jobs:
           prune_repo "$DST_REPO" fw
           prune_repo "$SRC_REPO" other
 
-      - name: Summary
+      - name: 汇总
         if: always()
         run: |
           set -uo pipefail

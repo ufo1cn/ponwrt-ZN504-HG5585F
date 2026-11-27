@@ -430,8 +430,8 @@ jobs:
           # package-metadata.pl 输出的包定义行是 "\tconfig PACKAGE_x"（带一个 TAB 缩进），
           # 用 '^config PACKAGE_' 匹配永远 0 条（#68/#69/#20 的“符号全缺/定义 0 个”都是这个正则假警报）。
           # Kconfig 里缩进无语义，直接把行首缩进抹平，后面所有 ^config PACKAGE_ 判断与 awk 块提取才成立。
-          sed -i -E 's/^[[:space:]]+config PACKAGE_/config PACKAGE_/' tmp/.config-package.in 2>/dev/null || true
-          pkgdefs=$(grep -cE '^[[:space:]]*config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
+          sed -i -E 's/^[[:space:]]+(menuconfig|config) PACKAGE_/\1 PACKAGE_/' tmp/.config-package.in 2>/dev/null || true
+          pkgdefs=$(grep -cE '^[[:space:]]*(menu)?config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
           echo ">>> 包元数据重建：PACKAGE 定义 ${pkgdefs:-0} 个"
           [ "${pkgdefs:-0}" -ge 5000 ] || {
             echo "::error::包元数据重建后定义过少（${pkgdefs:-0}），feeds 扫描未生效"
@@ -450,8 +450,8 @@ jobs:
           echo ">>> 剩余选择 kmod=${left_kmod:-0} kernel=${left_kernel:-0} gpio-button-hotplug=${left_gpio:-0}"
           [ "${left_kmod:-0}" -eq 0 ] && [ "${left_kernel:-0}" -eq 0 ] && [ "${left_gpio:-0}" -eq 0 ] \
             || { echo "::error::.config 里仍有 kmod/kernel 包选择，会触发内核编译"; exit 1; }
-          if grep -qE '^[[:space:]]*config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in 2>/dev/null; then
-            grep -nE '^[[:space:]]*config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in || true
+          if grep -qE '^[[:space:]]*(menu)?config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in 2>/dev/null; then
+            grep -nE '^[[:space:]]*(menu)?config PACKAGE_(kernel|gpio-button-hotplug)([[:space:]]|$)' tmp/.config-package.in || true
             echo "::error::包元数据里仍有 kernel/gpio-button-hotplug 定义，会触发内核编译"
             exit 1
           fi
@@ -476,8 +476,8 @@ jobs:
             return 1
           }
           dep_deps() {
-            awk -v want="config PACKAGE_$1" '
-              $0==want {inside=1; next}
+            awk -v sym="$1" '
+              $0 ~ ("^(menu)?config PACKAGE_" sym "$") {inside=1; next}
               /^[a-z]+ / { inside=0 }
               inside && $1=="depends" && $2=="on" && index($3,"PACKAGE_")==1 { print substr($3,9) }
             ' tmp/.config-package.in 2>/dev/null || true
@@ -488,7 +488,7 @@ jobs:
             dep_skip "$d_sym" && return 0
             grep -qxF "$d_sym" /tmp/sel-seen.txt 2>/dev/null && return 0
             echo "$d_sym" >> /tmp/sel-seen.txt
-            if ! grep -qE "^[[:space:]]*config PACKAGE_${d_sym}[[:space:]]*$" tmp/.config-package.in 2>/dev/null; then
+            if ! grep -qE "^[[:space:]]*(menu)?config PACKAGE_${d_sym}[[:space:]]*$" tmp/.config-package.in 2>/dev/null; then
               echo ">>> 依赖符号不在包元数据里，跳过：${d_sym}"
               return 0
             fi
@@ -538,7 +538,7 @@ jobs:
           timeout 900 bash -c 'yes "" | make oldconfig' >/tmp/pkg-oldconfig-sel2.log 2>&1 || true
           meta_miss=""
           for s in $sym_list; do
-            if ! grep -qE "^[[:space:]]*config PACKAGE_${s}[[:space:]]*$" tmp/.config-package.in; then
+            if ! grep -qE "^[[:space:]]*(menu)?config PACKAGE_${s}[[:space:]]*$" tmp/.config-package.in; then
               meta_miss="$meta_miss $s"
               echo ">>> [diag] ${s} 未精确命中，近似行（cat -A 看隐藏字符）："
               grep -n "PACKAGE_${s}" tmp/.config-package.in 2>/dev/null | head -n 5 | cat -A || true
@@ -582,8 +582,8 @@ jobs:
           # package-metadata.pl 输出的包定义行是 "\tconfig PACKAGE_x"（带一个 TAB 缩进），
           # 用 '^config PACKAGE_' 匹配永远 0 条（#68/#69/#20 的“符号全缺/定义 0 个”都是这个正则假警报）。
           # Kconfig 里缩进无语义，直接把行首缩进抹平，后面所有 ^config PACKAGE_ 判断与 awk 块提取才成立。
-          sed -i -E 's/^[[:space:]]+config PACKAGE_/config PACKAGE_/' tmp/.config-package.in 2>/dev/null || true
-          pkgdefs=$(grep -cE '^[[:space:]]*config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
+          sed -i -E 's/^[[:space:]]+(menuconfig|config) PACKAGE_/\1 PACKAGE_/' tmp/.config-package.in 2>/dev/null || true
+          pkgdefs=$(grep -cE '^[[:space:]]*(menu)?config PACKAGE_' tmp/.config-package.in 2>/dev/null || true)
           echo ">>> 包元数据重建：PACKAGE 定义 ${pkgdefs:-0} 个"
           [ "${pkgdefs:-0}" -ge 5000 ] || {
             echo "::error::包元数据重建后定义过少（${pkgdefs:-0}），feeds 扫描未生效"
@@ -592,7 +592,7 @@ jobs:
           }
             meta_miss=""
             for s in $sym_list; do
-              if ! grep -qE "^[[:space:]]*config PACKAGE_${s}[[:space:]]*$" tmp/.config-package.in; then
+              if ! grep -qE "^[[:space:]]*(menu)?config PACKAGE_${s}[[:space:]]*$" tmp/.config-package.in; then
               meta_miss="$meta_miss $s"
               echo ">>> [diag] ${s} 未精确命中，近似行（cat -A 看隐藏字符）："
               grep -n "PACKAGE_${s}" tmp/.config-package.in 2>/dev/null | head -n 5 | cat -A || true
@@ -629,7 +629,7 @@ jobs:
             echo "::error::清单包在 .config 未被选中（包名不存在或依赖不可选）:${selmiss}"
             for s in $selmissym; do
               echo "--- 元数据里的 PACKAGE_${s} ---"
-              awk -v want="config PACKAGE_${s}" 'index($0,want)==1{f=1} f{print} f&&/^[a-z]+ /&&index($0,want)!=1{exit}' tmp/.config-package.in 2>/dev/null | head -n 20 || true
+              grep -n -A12 -E "^(menu)?config PACKAGE_${s}" tmp/.config-package.in 2>/dev/null | head -n 30 || true
             done
             exit 1
           fi
