@@ -463,7 +463,7 @@ jobs:
           #（incremental #72/#73 的 camwatch）。这里按 tmp/.packageinfo 的 Depends 递归
           # 展开成 =m；不带 PACKAGE_ 的裸符号只白名单置 =y（如 FFMPEG_PROGRAMS）。
           if [ -f tmp/.packageinfo ]; then
-            python3 - "$only_pkgs" configs/pon-userspace-packages.txt configs/pon-extra-packages.txt <<'PY'
+            python3 - "${only_pkgs:-all}" configs/pon-userspace-packages.txt configs/pon-extra-packages.txt <<'PY'
           import re, os, sys
 
           BARE_OK = {'FFMPEG_PROGRAMS'}
