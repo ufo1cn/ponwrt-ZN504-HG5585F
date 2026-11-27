@@ -443,12 +443,22 @@ jobs:
       - name: Build host tools and toolchain
         run: |
           set -euo pipefail
-          # 并发编 tools 偶发失败（fakeroot/flex 同时红、无错误文本）时串行重试一次：
-          # -j1 会把真正的错误打出来，也避开并发带来的偶发问题。
-          make -j"$(nproc)" tools/compile || {
-            echo "::warning::并发编 tools 失败，改串行重试（-j1 会打印具体错误）"
-            make -j1 tools/compile
-          }
+          # 并发编 tools 偶发失败（fakeroot/flex 同时红、无错误文本）时先串行重试；
+          # 仍失败就单编这两个工具并开 V=s，把真实错误行打出来（否则日志只有 "failed to build"）。
+          if ! make -j"$(nproc)" tools/compile; then
+            echo "::warning::并发编 tools 失败，改串行重试"
+            if ! make -j1 tools/compile; then
+              for t in flex fakeroot; do
+                echo "=== 诊断 tools/$t：缓存 stamp 与产物 ==="
+                ls -la build_dir/host/${t}-* 2>/dev/null | head -n 60 || true
+                ls -la staging_dir/host/stamp 2>/dev/null | grep -E ".${t}_installed" || true
+                ls -la staging_dir/host/bin 2>/dev/null | grep -E "$t" || true
+                echo "=== tools/$t 单编（V=s，末尾 150 行）==="
+                make -C "tools/$t" compile V=s 2>&1 | tail -n 150 || true
+              done
+              exit 1
+            fi
+          fi
           make -j"$(nproc)" toolchain/compile
 
 
