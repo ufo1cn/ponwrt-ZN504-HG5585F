@@ -843,7 +843,9 @@ jobs:
             [ -f "$mk" ] || return 0
             grep -q 'define KernelPackage/' "$mk" || return 0
             grep -q 'define Package/' "$mk" || return 0
-            grep -q 'KERNEL_MAKE' "$mk" || return 0
+            # 前面的 Strip 步骤可能已把 KERNEL_MAKE 段摘掉，不能再用它当门槛：
+            # appfilter 这类「先摘内核编译段、后删 KernelPackage 定义」的包会被漏掉（r90 实证）。
+            grep -qE 'define KernelPackage/|include .*kernel\.mk' "$mk" || return 0
             sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+)//g' "$mk"
             # 只摘 Build/Compile 不够：KernelPackage/xxx 这段定义会让 .built 依赖
             # build_dir/.../linux-<ver>/.config（内核树），包流没有内核源码，会报
