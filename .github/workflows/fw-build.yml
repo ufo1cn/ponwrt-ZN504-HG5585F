@@ -890,12 +890,20 @@ jobs:
         run: |
           set -uo pipefail
           n=0
+          back=$(date -d '-2 hours' '+%Y-%m-%d %H:%M:%S')
+          soon=$(date -d '+1 minute' '+%Y-%m-%d %H:%M:%S')
           for d in build_dir/host build_dir/toolchain-* staging_dir/host staging_dir/toolchain-*; do
             [ -e "$d" ] || continue
-            find "$d" -type f -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
+            # (1) 先把所有"未来时间戳"压回过去：缓存可能残留上一次推的 2035 戳，
+            #     CMake/ninja 会因输入比输出新而无限 Re-running CMake（#55 实证：
+            #     libnl-tiny 'build.ninja still dirty after 100 tries'）。
+            find "$d" -type f -newermt "$soon" -exec touch -d "$back" {} + 2>/dev/null || true
+            # (2) 只把真正的"已编完"标记顶到未来，让 make 跳过 host tools 重编。
+            find "$d" -type f \( -path '*/stamp/*' -o -name '.built*' -o -name '.prepared*' -o -name '.configured*' \) \
+              -exec touch -d '2035-01-01 00:00:00' {} + 2>/dev/null || true
             n=$((n+1))
           done
-          echo ">>> 时间戳归一：${n} 个目录已推到 2035-01-01（make 才会跳过已编产物）"
+          echo ">>> 时间戳归一：${n} 个目录（未来戳压回过去，只有 stamp 顶到 2035）"
 
       - name: 编译固件
         run: |
