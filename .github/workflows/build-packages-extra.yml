@@ -592,15 +592,47 @@ jobs:
             return 1
           }
           dep_deps() {
+            # 只取「depends on PACKAGE_x」会漏两类依赖（incremental #73 的 camwatch）：
+            #   1) select PACKAGE_x —— 运行期硬依赖（ffmpeg/curl/jsonfilter 就是这么漏的）；
+            #   2) depends on !(COND) || PACKAGE_x —— 条件依赖写成多 token，旧正则只认第一个词。
+            # 所以这里把整段里的 PACKAGE_ 符号全部榨出来；不带 PACKAGE_ 的裸符号只认白名单
+            # （FFMPEG_PROGRAMS 这类控制包本身是否存在的开关，=y 是安全的；BUILD_PATENTED 之类不碰）。
             awk -v sym="$1" '
-              $0 ~ ("^(menu)?config PACKAGE_" sym "$") {inside=1; next}
-              /^[a-z]+ / { inside=0 }
-              inside && $1=="depends" && $2=="on" && index($3,"PACKAGE_")==1 { print substr($3,9) }
+              $0 ~ ("^[[:space:]]*(menu)?config PACKAGE_" sym "[[:space:]]*$") {inside=1; next}
+              inside && /^[[:space:]]*(menu)?config / {inside=0}
+              inside && $1=="select" {
+                t=$2; sub(/^PACKAGE_/, "", t); print t; next
+              }
+              inside && $1=="depends" && $2=="on" {
+                line=$0
+                while (match(line, /PACKAGE_[A-Za-z0-9_+.-]+/)) {
+                  t=substr(line, RSTART+8, RLENGTH-8); print t
+                  line=substr(line, RSTART+RLENGTH)
+                }
+                if ($0 ~ /^[[:space:]]*depends on [A-Za-z0-9_]+[[:space:]]*$/) print "BARE:" $3
+              }
             ' tmp/.config-package.in 2>/dev/null || true
           }
+
           sel_dep() {
             d_sym="$1"; d_depth="$2"
             [ -n "$d_sym" ] || return 0
+            # 裸符号（dep_deps 用 BARE: 前缀标出）：只允许白名单里的构建开关置 =y。
+            case "$d_sym" in
+              BARE:*)
+                d_sym="${d_sym#BARE:}"
+                case "$d_sym" in
+                  FFMPEG_PROGRAMS) ;;
+                  *) return 0 ;;
+                esac
+                if ! grep -q "^CONFIG_${d_sym}=y" .config; then
+                  sed -i "/^CONFIG_${d_sym}=/d; /^# CONFIG_${d_sym} is not set/d" .config
+                  printf 'CONFIG_%s=y\n' "$d_sym" >> .config
+                  echo ">>> 补选裸符号 ${d_sym}=y（深度 ${d_depth}）"
+                fi
+                return 0
+                ;;
+            esac
             dep_skip "$d_sym" && return 0
             grep -qxF "$d_sym" /tmp/sel-seen.txt 2>/dev/null && return 0
             echo "$d_sym" >> /tmp/sel-seen.txt
@@ -613,7 +645,7 @@ jobs:
               printf 'CONFIG_PACKAGE_%s=m\n' "$d_sym" >> .config
               echo ">>> 补选依赖 ${d_sym}=m（深度 ${d_depth}）"
             fi
-            [ "$d_depth" -lt 5 ] || return 0
+            [ "$d_depth" -lt 12 ] || return 0
             for d_next in $(dep_deps "$d_sym"); do
               sel_dep "$d_next" $((d_depth+1))
             done
