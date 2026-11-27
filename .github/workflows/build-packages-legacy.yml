@@ -372,6 +372,11 @@ jobs:
             --include=Makefile package feeds 2>/dev/null | grep -v '^package/kernel/' || true)
           n=0
           for f in $stripped; do
+            # pon_drivers 只含内核模块包（KernelPackage/$(KERNEL_MAKE) M=... modules），
+            # 这些包永不出现在任何用户态清单里，包流既不编也不该改它，整段跳过。
+            case "$f" in
+              feeds/pon_drivers/*) echo ">>> 跳过 $f（kmod-only feed，内核模块由固件流程编）"; continue ;;
+            esac
             sed -i -E 's/\+(kmod-[A-Za-z0-9_.+-]+|kernel|gpio-button-hotplug)//g' "$f"
             # 同一份 Makefile 里用 $(KERNEL_MAKE) 编内核模块的段（open-app-filter 的 oaf.ko）
             # 包流没有内核树，必须摘掉；摘不掉直接失败，避免又拉起内核链。
