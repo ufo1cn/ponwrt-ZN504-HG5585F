@@ -546,6 +546,15 @@ jobs:
             exit 1
           fi
           echo ">>> 包元数据内 kernel/gpio 定义：0"
+          # ffmpeg CLI（Package/ffmpeg）的存在由 FFMPEG_PROGRAMS 开关决定。开关没开时
+          # PACKAGE_ffmpeg 不可选，清单包元数据里的 depends on FFMPEG_PROGRAMS 就不成立，
+          # oldconfig 会把该清单包静默清回 not set（incremental #72：camwatch 写回 =m 后仍被清）。
+          # 这是纯应用层构建开关（不碰内核），直接置 y；没有包依赖 ffmpeg CLI 时也不产生副作用。
+          if ! grep -q '^CONFIG_FFMPEG_PROGRAMS=y' .config; then
+            sed -i '/^CONFIG_FFMPEG_PROGRAMS=/d; /^# CONFIG_FFMPEG_PROGRAMS is not set/d' .config
+            printf 'CONFIG_FFMPEG_PROGRAMS=y\n' >> .config
+            echo ">>> 置 CONFIG_FFMPEG_PROGRAMS=y（让 ffmpeg CLI 可被清单包选中）"
+          fi
           # ⑤ 清单包显式选中：包流 .config 来自固件配置，清单里的包未必在其中。
           #    没有 CONFIG_PACKAGE_<符号>=m 时 make <path>/compile 只做 build 不打包，
           #    表现为「编译命令成功但没有产出 apk」（run 45625439183 的 camlive/tailscale/cifs-utils）。
